@@ -10,8 +10,11 @@ import (
 	"os"
 	"strings"
 
+	"github.com/cilium/coverbee/pkg/verifierlog"
+
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
+	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/maps/callsmap"
 )
@@ -309,8 +312,23 @@ func LoadCollection(spec *ebpf.CollectionSpec, opts *CollectionOptions) (*ebpf.C
 	// Collection. ebpf-go will reject maps with pins it doesn't recognize.
 	toReplace := consumePinReplace(spec)
 
+	if !opts.CollectionOptions.Programs.LogDisabled && opts.CollectionOptions.Programs.LogLevel == 0 {
+		opts.CollectionOptions.Programs.LogLevel = ebpf.LogLevelStats
+	}
+
 	// Attempt to load the Collection.
 	coll, err := ebpf.NewCollectionWithOptions(spec, opts.CollectionOptions)
+
+	if err == nil {
+		for _, prog := range coll.Programs {
+			log.WithFields(logrus.Fields{
+				"progInfo": prog.String(),
+			}).Debug("BPF program details")
+			for _, line := range verifierlog.ParseVerifierLog(prog.VerifierLog) {
+				log.Debug("Kernel verifier stat: ", line)
+			}
+		}
+	}
 
 	// Collect key names of maps that are not compatible with their pinned
 	// counterparts and remove their pinning flags.

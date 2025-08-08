@@ -4,39 +4,69 @@
 package metrics
 
 import (
-	"context"
-	"encoding/json"
+	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
-	"os/exec"
-	"slices"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/cilium/cilium/pkg/time"
+	"github.com/cilium/cilium/pkg/version"
+	"github.com/cilium/cilium/pkg/versioncheck"
+	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
 
 type bpfCollector struct {
 	sfg singleflight.Group
 
-	bpfMapsCount      *prometheus.Desc
-	bpfMapsMemory     *prometheus.Desc
-	bpfProgramsCount  *prometheus.Desc
-	bpfProgramsMemory *prometheus.Desc
+	bpfMapsCount          *prometheus.Desc
+	bpfMapsMemory         *prometheus.Desc
+	bpfProgramsCount      *prometheus.Desc
+	bpfProgramsMemory     *prometheus.Desc
+	bpfProgramsComplexity *prometheus.Desc
 }
 
 type bpfUsage struct {
-	ids                   []uint64
-	virtualMemoryMaxBytes float64
+	count                 uint32
+	virtualMemoryMaxBytes uint32
 }
 
-func (bu bpfUsage) count() float64 {
-	return float64(len(bu.ids))
+func isVerifierComplexitySupported() string {
+	minVersion := "5.16"
+
+	v, err := versioncheck.Version(minVersion)
+	if err != nil {
+		return "Cannot parse minimum kernel version — this metric may not be supported"
+	}
+
+	kv, err := version.GetKernelVersion()
+	if err != nil {
+		return "Cannot determine current kernel version — this metric may not be supported"
+	}
+
+	if kv.LT(v) {
+		return fmt.Sprintf(
+			"Kernel verifier complexity metric is not available: running kernel %v < required %v",
+			kv, minVersion,
+		)
+	}
+
+	return ""
 }
 
 func newbpfCollector() *bpfCollector {
+	metricInfo := "Maximum number of verified instructions among loaded BPF programs."
+	metricDescription := isVerifierComplexitySupported()
+	if len(metricDescription) > 0 {
+		metricInfo = metricInfo + " " + metricDescription
+	}
+
 	return &bpfCollector{
 		bpfMapsCount: prometheus.NewDesc(
 			prometheus.BuildFQName(Namespace, "", "bpf_maps"),
@@ -58,6 +88,11 @@ func newbpfCollector() *bpfCollector {
 			"BPF programs kernel max memory usage size in bytes.",
 			nil, nil,
 		),
+		bpfProgramsComplexity: prometheus.NewDesc(
+			prometheus.BuildFQName(Namespace, "", "bpf_progs_complexity_max_verified_insts"),
+			metricInfo,
+			nil, nil,
+		),
 	}
 }
 
@@ -65,79 +100,198 @@ func (s *bpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	prometheus.DescribeByCollect(s, ch)
 }
 
-type memoryEntry struct {
-	ID           uint64 `json:"id"`
-	Name         string `json:"name"`
-	BytesMemlock uint64 `json:"bytes_memlock"`
-
-	// (returned only for programs)
-	MapIDs []uint64 `json:"map_ids"`
+func findFirstNumber(data []byte, start int) int {
+	n := len(data)
+	for start < n {
+		c := data[start]
+		switch {
+		case c >= '0' && c <= '9':
+			return start
+		default:
+			start++
+		}
+	}
+	return -1
 }
 
-func getBPFUsage(typ string, filter func(memoryEntry) bool) (bpfUsage, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "bpftool", "-j", typ, "show")
-	out, err := cmd.Output()
+func getBpfMemory(fd int) (uint32, error) {
+	path := fmt.Sprintf("/proc/self/fdinfo/%d", fd)
+	f, err := os.Open(path)
 	if err != nil {
-		return bpfUsage{}, fmt.Errorf("unable to get bpftool output: %w", err)
+		return 0, err
 	}
+	defer f.Close()
 
-	var (
-		memoryEntries []memoryEntry
-		usage         bpfUsage
-	)
+	reader := bufio.NewReaderSize(f, 512)
+	for {
+		data, _, err := reader.ReadLine()
+		if err != nil {
+			if err == io.EOF {
+				return 0, fmt.Errorf("memlock key not found in %s", path)
+			}
+			return 0, err
+		}
 
-	err = json.Unmarshal(out, &memoryEntries)
-	if err != nil {
-		return usage, fmt.Errorf("unable to unmarshal bpftool output: %w", err)
-	}
-
-	for _, entry := range memoryEntries {
-		if !filter(entry) {
+		key := []byte("memlock:")
+		idx := bytes.Index(data, key)
+		if idx == -1 {
 			continue
 		}
 
-		usage.ids = append(usage.ids, entry.ID)
-		usage.virtualMemoryMaxBytes += float64(entry.BytesMemlock)
-	}
+		valueIdx := findFirstNumber(data, idx+len(key))
+		if valueIdx == -1 {
+			return 0, fmt.Errorf("memlock value not found")
+		}
 
-	return usage, nil
+		valBytes := data[valueIdx:]
+		var val uint32
+		for _, c := range valBytes {
+			if c < '0' || c > '9' {
+				break
+			}
+			val = val*10 + uint32(c-'0')
+		}
+		return uint32(val), nil
+	}
+}
+
+func getCiliumMapsStats() (mapIDs map[ebpf.MapID]struct{}, memorySum uint32, count uint32, err error) {
+	mapIDs = make(map[ebpf.MapID]struct{}, 256)
+	var startID ebpf.MapID = 0
+	for {
+		nextID, err := ebpf.MapGetNextID(startID)
+		if err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				break
+			}
+			return nil, 0, 0, fmt.Errorf("failed to get next map ID after %d: %w", startID, err)
+		}
+
+		startID = nextID
+		m, err := ebpf.NewMapFromID(nextID)
+		if err != nil {
+			continue
+		}
+
+		info, err := m.Info()
+		if err != nil {
+			m.Close()
+			continue
+		}
+
+		if !strings.HasPrefix(info.Name, "cilium_") {
+			m.Close()
+			continue
+		}
+
+		mapMemory, err := getBpfMemory(int(m.FD()))
+		m.Close()
+		if err != nil {
+			continue
+		}
+
+		mapIDs[nextID] = struct{}{}
+		count++
+		memorySum += mapMemory
+	}
+	return mapIDs, memorySum, count, nil
+}
+
+func getCiliumProgsStats(ciliumMapIDs map[ebpf.MapID]struct{}) (maxComplexity uint32, memorySum uint32, count uint32, err error) {
+	var startID ebpf.ProgramID = 0
+	for {
+		nextID, err := ebpf.ProgramGetNextID(startID)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			return 0, 0, 0, fmt.Errorf("failed to get next program ID: %v", err)
+		}
+
+		startID = nextID
+		prog, err := ebpf.NewProgramFromID(nextID)
+		if err != nil {
+			continue
+		}
+
+		info, err := prog.Info()
+		if err != nil {
+			prog.Close()
+			continue
+		}
+
+		mapIDs, ok := info.MapIDs()
+		if !ok {
+			prog.Close()
+			continue
+		}
+
+		usesCiliumMap := false
+		for _, mapID := range mapIDs {
+			if _, ok := ciliumMapIDs[mapID]; ok {
+				usesCiliumMap = true
+				break
+			}
+		}
+		if !usesCiliumMap {
+			prog.Close()
+			continue
+		}
+
+		progMemory, err := getBpfMemory(int(prog.FD()))
+		prog.Close()
+		if err != nil {
+			continue
+		}
+
+		insts, valid := info.VerifiedInstructions()
+		if valid && insts > maxComplexity {
+			maxComplexity = insts
+		}
+
+		count++
+		memorySum += progMemory
+	}
+	return maxComplexity, memorySum, count, nil
 }
 
 func (s *bpfCollector) Collect(ch chan<- prometheus.Metric) {
 	type bpfUsageResults struct {
-		maps     bpfUsage
-		programs bpfUsage
+		maps          bpfUsage
+		programs      bpfUsage
+		maxComplexity uint32
 	}
 
 	// Avoid querying BPF multiple times concurrently, if it happens, additional callers will wait for the
 	// first one to finish and reuse its resulting values.
 	results, err, _ := s.sfg.Do("collect", func() (interface{}, error) {
 		var (
-			results = bpfUsageResults{}
-			err     error
+			results                                 = bpfUsageResults{}
+			mapIDs                                  map[ebpf.MapID]struct{}
+			mapMemorySum, mapCount                  uint32
+			maxComplexity, progMemorySum, progCount uint32
+			err                                     error
 		)
 
-		if results.maps, err = getBPFUsage("map", func(entry memoryEntry) bool {
-			// Filter on maps prefixed with cilium_
-			return strings.HasPrefix(entry.Name, "cilium_")
-		}); err != nil {
+		if mapIDs, mapMemorySum, mapCount, err = getCiliumMapsStats(); err != nil {
 			return results, err
 		}
 
-		if results.programs, err = getBPFUsage("prog", func(entry memoryEntry) bool {
-			// Filter on programs related to cilium maps
-			for i := 0; i < len(entry.MapIDs); i++ {
-				if slices.Contains(results.maps.ids, entry.MapIDs[i]) {
-					return true
-				}
-			}
-			return false
-		}); err != nil {
+		if maxComplexity, progMemorySum, progCount, err = getCiliumProgsStats(mapIDs); err != nil {
 			return results, err
 		}
 
+		results = bpfUsageResults{
+			maps: bpfUsage{
+				count:                 mapCount,
+				virtualMemoryMaxBytes: mapMemorySum,
+			},
+			programs: bpfUsage{
+				count:                 progCount,
+				virtualMemoryMaxBytes: progMemorySum,
+			},
+			maxComplexity: maxComplexity,
+		}
 		return results, nil
 	})
 
@@ -149,24 +303,30 @@ func (s *bpfCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		s.bpfMapsCount,
 		prometheus.GaugeValue,
-		results.(bpfUsageResults).maps.count(),
+		float64(results.(bpfUsageResults).maps.count),
 	)
 
 	ch <- prometheus.MustNewConstMetric(
 		s.bpfMapsMemory,
 		prometheus.GaugeValue,
-		results.(bpfUsageResults).maps.virtualMemoryMaxBytes,
+		float64(results.(bpfUsageResults).maps.virtualMemoryMaxBytes),
 	)
 
 	ch <- prometheus.MustNewConstMetric(
 		s.bpfProgramsCount,
 		prometheus.GaugeValue,
-		results.(bpfUsageResults).programs.count(),
+		float64(results.(bpfUsageResults).programs.count),
 	)
 
 	ch <- prometheus.MustNewConstMetric(
 		s.bpfProgramsMemory,
 		prometheus.GaugeValue,
-		results.(bpfUsageResults).programs.virtualMemoryMaxBytes,
+		float64(results.(bpfUsageResults).programs.virtualMemoryMaxBytes),
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		s.bpfProgramsComplexity,
+		prometheus.GaugeValue,
+		float64(results.(bpfUsageResults).maxComplexity),
 	)
 }
