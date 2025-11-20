@@ -6,6 +6,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 
@@ -33,7 +34,14 @@ var (
 				cmd.PrintErrf("Invalid argument: %s", err.Error())
 				return
 			}
+
 			common.RequireRootPrivilege("cilium bpf ct list")
+
+			err = importCtMapsDump()
+			if err != nil {
+				cmd.PrintErrf("importCtMapsDump failed: %s", err.Error())
+				return
+			}
 			dumpCt(getMaps(t, id), t)
 		},
 	}
@@ -42,6 +50,23 @@ var (
 	timeDiffClockSourceMode string
 	timeDiffClockSourceHz   int64
 )
+
+func importCtMapsDump() error {
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to read stdin: %w", err)
+	}
+
+	if len(input) == 0 {
+		return nil
+	}
+
+	if err = ctmap.InsertAll(input); err != nil {
+		return fmt.Errorf("failed to insert ct dump: %w", err)
+	}
+
+	return nil
+}
 
 func init() {
 	bpfCtListCmd.Flags().BoolVarP(&timeDiff, "time-diff", "d", false, "print time difference for entries")
