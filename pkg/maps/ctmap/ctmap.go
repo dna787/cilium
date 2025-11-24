@@ -178,6 +178,14 @@ type GCFilter struct {
 	// passes. It has no impact on CT GC, but can be used to iterate over valid
 	// CT entries.
 	EmitCTEntryCB EmitCTEntryCBFunc
+
+	// MigrationSafeCleanup enables migration-safe selective cleanup:
+	// - When true, perform directional deletion *only*:
+	//     * delete OUT (src==MatchIP)
+	//     * delete IN  (dst==MatchIP)
+	//   and do NOT delete entries that will be used after VM migrate on other node.
+	// - When false (default), legacy behavior (src || dst match) is used.
+	MigrationSafeCleanup bool
 }
 
 // EmitCTEntryCBFunc is the type used for the EmitCTEntryCB callback in GCFilter
@@ -610,9 +618,22 @@ func (f GCFilter) doFiltering(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, 
 	}
 
 	if f.MatchIPs != nil {
-		_, srcIPExists := f.MatchIPs[srcIP]
-		_, dstIPExists := f.MatchIPs[dstIP]
-		if srcIPExists || dstIPExists {
+		_, srcMatch := f.MatchIPs[srcIP]
+		_, dstMatch := f.MatchIPs[dstIP]
+
+		if f.MigrationSafeCleanup {
+			if flags == TUPLE_F_OUT {
+				if srcMatch {
+					return deleteEntry
+				}
+			} else if flags == TUPLE_F_IN {
+				if dstMatch {
+					return deleteEntry
+				}
+			} else if srcMatch || dstMatch {
+				return deleteEntry
+			}
+		} else if srcMatch || dstMatch {
 			return deleteEntry
 		}
 	}
