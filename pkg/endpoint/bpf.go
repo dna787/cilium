@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
+	"github.com/cilium/cilium/pkg/maps/ipcache"
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
@@ -924,12 +926,31 @@ func (e *Endpoint) garbageCollectConntrack(filter ctmap.GCFilter) {
 	}
 }
 
+func isVmRelatedEndpoint(e *Endpoint) bool {
+	ip := net.IP(e.IPv4.AsSlice())
+	mask := net.CIDRMask(32, 32)
+	k := ipcache.NewKey(ip, mask, uint16(option.Config.ClusterID))
+	m := ipcache.IPCacheMap()
+	v, err := m.Lookup(&k)
+	if err != nil {
+		return false
+	}
+
+	if v != nil {
+		info := v.(*ipcache.RemoteEndpointInfo)
+		return !info.TunnelEndpoint.IsZero()
+	}
+
+	return false
+}
+
 func (e *Endpoint) scrubIPsInConntrackTableLocked() {
 	e.garbageCollectConntrack(ctmap.GCFilter{
 		MatchIPs: map[netip.Addr]struct{}{
 			e.IPv4: {},
 			e.IPv6: {},
 		},
+		MigrationSafeCleanup: isVmRelatedEndpoint(e),
 	})
 }
 

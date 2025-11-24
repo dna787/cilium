@@ -178,6 +178,14 @@ type GCFilter struct {
 	// passes. It has no impact on CT GC, but can be used to iterate over valid
 	// CT entries.
 	EmitCTEntryCB EmitCTEntryCBFunc
+
+	// MigrationSafeCleanup enables migration-safe selective cleanup:
+	// - When true, perform directional deletion *only*:
+	//     * delete OUT|SERVICE (src==MatchIP)
+	//     * delete IN  (dst==MatchIP)
+	//   and do NOT delete entries that will be used after VM migrate on other node.
+	// - When false (default), legacy behavior (src || dst match) is used.
+	MigrationSafeCleanup bool
 }
 
 // EmitCTEntryCBFunc is the type used for the EmitCTEntryCB callback in GCFilter
@@ -610,9 +618,28 @@ func (f GCFilter) doFiltering(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, 
 	}
 
 	if f.MatchIPs != nil {
-		_, srcIPExists := f.MatchIPs[srcIP]
-		_, dstIPExists := f.MatchIPs[dstIP]
-		if srcIPExists || dstIPExists {
+		_, srcMatch := f.MatchIPs[srcIP]
+		_, dstMatch := f.MatchIPs[dstIP]
+
+		if f.MigrationSafeCleanup {
+			// this both conditions represent TUPLE_F_OUT conntracks
+			if flags == TUPLE_F_OUT || flags == TUPLE_F_RELATED {
+				if srcMatch {
+					return deleteEntry
+				}
+			} else if flags&TUPLE_F_SERVICE != 0 {
+				// this service conntrack related to TUPLE_F_OUT
+				// but cilium safe src|dst in reverse order for this type conntrack
+				// so we must check relation by dst address
+				if dstMatch {
+					return deleteEntry
+				}
+			} else if flags&TUPLE_F_IN != 0 {
+				if dstMatch {
+					return deleteEntry
+				}
+			}
+		} else if srcMatch || dstMatch {
 			return deleteEntry
 		}
 	}
