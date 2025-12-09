@@ -115,6 +115,7 @@ type ipcacheManager interface {
 	UpsertLabels(prefix netip.Prefix, lbls labels.Labels, src source.Source, resource ipcacheTypes.ResourceID)
 	RemoveLabelsExcluded(lbls labels.Labels, toExclude map[netip.Prefix]struct{}, resource ipcacheTypes.ResourceID)
 	DeleteOnMetadataMatch(IP string, source source.Source, namespace, name string) (namedPortsChanged bool)
+	IsIPcacheOwner(IP string, source source.Source, namespace, name string) (isOwner bool)
 }
 
 type K8sWatcher struct {

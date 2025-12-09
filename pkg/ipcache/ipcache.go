@@ -12,6 +12,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"fmt"
+
+	"github.com/cilium/cilium/pkg/bpf"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/counter"
@@ -22,11 +25,354 @@ import (
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/types"
+	"github.com/cilium/ebpf"
 )
+
+// lxcmap start
+
+const (
+	MapName = "cilium_lxc"
+
+	// MaxEntries represents the maximum number of endpoints in the map
+	MaxEntries = 65535
+
+	// PortMapMax represents the maximum number of Ports Mapping per container.
+	PortMapMax = 16
+)
+
+var (
+	// LXCMap represents the BPF map for endpoints
+	lxcMap     *bpf.Map
+	lxcMapOnce sync.Once
+)
+
+type LxcEndpointInfo struct {
+	key    *EndpointKey
+	info   *EndpointInfo
+	active bool
+}
+
+var globalIPCache *IPCache
+
+func SetGlobalIPCache(ipcache *IPCache) {
+	globalIPCache = ipcache
+}
+
+func (ipc *IPCache) isIPCacheHostLocal(epAddr string, nodeIPv4 net.IP) bool {
+	ipKeyPair := ipc.ipToHostIPCache[epAddr]
+	host := ipKeyPair.IP
+	if host == nil {
+		// cilium_health ep always have nil host - force default behavior
+		return true
+	}
+	return host.Equal(nodeIPv4)
+}
+
+func (ipc *IPCache) checkLxcMapRelation(ip string, hostIP, oldHostIP net.IP) {
+	if hostIP.Equal(oldHostIP) {
+		return
+	}
+
+	hostIP4 := hostIP.To4()
+	if hostIP4 == nil {
+		return
+	}
+
+	lxc, exist := ipc.ipToEndpointInfo[ip]
+	if !exist {
+		return
+	}
+
+	nodeIPv4 := node.GetIPv4()
+	isLocal := nodeIPv4.Equal(hostIP4)
+	if isLocal && !lxc.active {
+		LXCMap().Update(lxc.key, lxc.info)
+		lxc.active = true
+		log.WithFields(logrus.Fields{
+			logfields.IPAddr: ip,
+		}).Debug("restore record in in cilium_lxc map")
+	} else if !isLocal && lxc.active {
+		LXCMap().Delete(lxc.key)
+		lxc.active = false
+		log.WithFields(logrus.Fields{
+			logfields.IPAddr: ip,
+		}).Debug("hiding record in in cilium_lxc map")
+	}
+}
+
+func getEndpointAddress(v *EndpointKey) string {
+	ip := v.ToIP()
+	if ip == nil {
+		return ""
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return ""
+	}
+
+	return ip4.String()
+}
+
+func LXCMap() *bpf.Map {
+	lxcMapOnce.Do(func() {
+		lxcMap = bpf.NewMap(MapName,
+			ebpf.Hash,
+			&EndpointKey{},
+			&EndpointInfo{},
+			MaxEntries,
+			0,
+		).WithCache().WithPressureMetric().
+			WithEvents(option.Config.GetEventBufferConfig(MapName))
+	})
+	return lxcMap
+}
+
+const (
+	// EndpointFlagHost indicates that this endpoint represents the host
+	EndpointFlagHost = 1
+
+	// EndpointFlagAtHostNS indicates that this endpoint is located at the host networking
+	// namespace
+	EndpointFlagAtHostNS = 2
+)
+
+// EndpointFrontend is the interface to implement for an object to synchronize
+// with the endpoint BPF map.
+type EndpointFrontend interface {
+	LXCMac() mac.MAC
+	GetNodeMAC() mac.MAC
+	GetIfIndex() int
+	GetParentIfIndex() int
+	GetID() uint64
+	IPv4Address() netip.Addr
+	IPv6Address() netip.Addr
+	GetIdentity() identity.NumericIdentity
+	IsAtHostNS() bool
+}
+
+// GetBPFKeys returns all keys which should represent this endpoint in the BPF
+// endpoints map
+func GetBPFKeys(e EndpointFrontend) []*EndpointKey {
+	keys := []*EndpointKey{}
+	if e.IPv6Address().IsValid() {
+		keys = append(keys, NewEndpointKey(e.IPv6Address().AsSlice()))
+	}
+
+	if e.IPv4Address().IsValid() {
+		keys = append(keys, NewEndpointKey(e.IPv4Address().AsSlice()))
+	}
+
+	return keys
+}
+
+// GetBPFValue returns the value which should represent this endpoint in the
+// BPF endpoints map
+// Must only be called if init() succeeded.
+func GetBPFValue(e EndpointFrontend) (*EndpointInfo, error) {
+	tmp := e.LXCMac()
+	mac, err := tmp.Uint64()
+	if len(tmp) > 0 && err != nil {
+		return nil, fmt.Errorf("invalid LXC MAC: %w", err)
+	}
+
+	tmp = e.GetNodeMAC()
+	nodeMAC, err := tmp.Uint64()
+	if len(tmp) > 0 && err != nil {
+		return nil, fmt.Errorf("invalid node MAC: %w", err)
+	}
+
+	// Both lxc and node mac can be nil for the case of L3/NOARP devices.
+	info := &EndpointInfo{
+		IfIndex:       uint32(e.GetIfIndex()),
+		LxcID:         uint16(e.GetID()),
+		MAC:           mac,
+		NodeMAC:       nodeMAC,
+		SecID:         e.GetIdentity().Uint32(), // Host byte-order
+		ParentIfIndex: uint32(e.GetParentIfIndex()),
+	}
+
+	if e.IsAtHostNS() {
+		info.Flags |= EndpointFlagAtHostNS
+	}
+
+	return info, nil
+
+}
+
+type pad2uint32 [2]uint32
+
+// EndpointInfo represents the value of the endpoints BPF map.
+//
+// Must be in sync with struct endpoint_info in <bpf/lib/common.h>
+type EndpointInfo struct {
+	IfIndex uint32 `align:"ifindex"`
+	Unused  uint16 `align:"unused"`
+	LxcID   uint16 `align:"lxc_id"`
+	Flags   uint32 `align:"flags"`
+	// go alignment
+	_             uint32
+	MAC           mac.Uint64MAC `align:"mac"`
+	NodeMAC       mac.Uint64MAC `align:"node_mac"`
+	SecID         uint32        `align:"sec_id"`
+	ParentIfIndex uint32        `align:"parent_ifindex"`
+	Pad           pad2uint32    `align:"pad"`
+}
+
+type EndpointKey struct {
+	bpf.EndpointKey
+}
+
+// NewEndpointKey returns an EndpointKey based on the provided IP address. The
+// address family is automatically detected
+func NewEndpointKey(ip net.IP) *EndpointKey {
+	return &EndpointKey{
+		EndpointKey: bpf.NewEndpointKey(ip, 0),
+	}
+}
+
+func (k *EndpointKey) New() bpf.MapKey { return &EndpointKey{} }
+
+// IsHost returns true if the EndpointInfo represents a host IP
+func (v *EndpointInfo) IsHost() bool {
+	return v.Flags&EndpointFlagHost != 0
+}
+
+// String returns the human readable representation of an EndpointInfo
+func (v *EndpointInfo) String() string {
+	if v.Flags&EndpointFlagHost != 0 {
+		return "(localhost)"
+	}
+
+	return fmt.Sprintf("id=%-5d sec_id=%-5d flags=0x%04X ifindex=%-3d mac=%s nodemac=%s parent_ifindex=%-3d",
+		v.LxcID,
+		v.SecID,
+		v.Flags,
+		v.IfIndex,
+		v.MAC,
+		v.NodeMAC,
+		v.ParentIfIndex,
+	)
+}
+
+func (v *EndpointInfo) New() bpf.MapValue { return &EndpointInfo{} }
+
+// WriteEndpoint updates the BPF map with the endpoint information and links
+// the endpoint information to all keys provided.
+func WriteEndpoint(f EndpointFrontend) error {
+	info, err := GetBPFValue(f)
+	if err != nil {
+		return err
+	}
+
+	// FIXME: Revert on failure
+	nodeIPv4 := node.GetIPv4()
+	// for prevent race conditions between ipcache upsert method used common mutex
+	globalIPCache.Lock()
+	defer globalIPCache.Unlock()
+	for _, v := range GetBPFKeys(f) {
+
+		epAddr := getEndpointAddress(v)
+		if epAddr == "" {
+			continue
+		}
+
+		if globalIPCache.isIPCacheHostLocal(epAddr, nodeIPv4) {
+			if err := LXCMap().Update(v, info); err != nil {
+				return err
+			}
+			globalIPCache.ipToEndpointInfo[epAddr] = &LxcEndpointInfo{
+				key:    v,
+				info:   info,
+				active: true,
+			}
+		} else {
+			LXCMap().Delete(v)
+			globalIPCache.ipToEndpointInfo[epAddr] = &LxcEndpointInfo{
+				key:    v,
+				info:   info,
+				active: false,
+			}
+			log.WithFields(logrus.Fields{
+				logfields.IPAddr: epAddr,
+			}).Debug("hiding pod address in cilium_lxc map")
+		}
+	}
+
+	return nil
+}
+
+// AddHostEntry adds a special endpoint which represents the local host
+func AddHostEntry(ip net.IP) error {
+	key := NewEndpointKey(ip)
+	ep := &EndpointInfo{Flags: EndpointFlagHost}
+	return LXCMap().Update(key, ep)
+}
+
+// SyncHostEntry checks if a host entry exists in the lxcmap and adds one if needed.
+// Returns boolean indicating if a new entry was added and an error.
+func SyncHostEntry(ip net.IP) (bool, error) {
+	key := NewEndpointKey(ip)
+	value, err := LXCMap().Lookup(key)
+	if err != nil || value.(*EndpointInfo).Flags&EndpointFlagHost == 0 {
+		err = AddHostEntry(ip)
+		if err == nil {
+			return true, nil
+		}
+	}
+	return false, err
+}
+
+// DeleteEntry deletes a single map entry
+func DeleteEntry(ip net.IP) error {
+	globalIPCache.Lock()
+	defer globalIPCache.Unlock()
+	delete(globalIPCache.ipToEndpointInfo, ip.To4().String())
+	return LXCMap().Delete(NewEndpointKey(ip))
+}
+
+// DeleteElement deletes the endpoint using all keys which represent the
+// endpoint. It returns the number of errors encountered during deletion.
+func DeleteElement(f EndpointFrontend) []error {
+	var errors []error
+	for _, k := range GetBPFKeys(f) {
+		ip := getEndpointAddress(k)
+		globalIPCache.Lock()
+		delete(globalIPCache.ipToEndpointInfo, ip)
+		globalIPCache.Unlock()
+		if err := LXCMap().Delete(k); err != nil {
+			errors = append(errors, fmt.Errorf("Unable to delete key %v from %s: %w", k, bpf.MapPath(MapName), err))
+		}
+	}
+
+	return errors
+}
+
+// DumpToMap dumps the contents of the lxcmap into a map and returns it
+func DumpToMap() (map[string]EndpointInfo, error) {
+	m := map[string]EndpointInfo{}
+	callback := func(key bpf.MapKey, value bpf.MapValue) {
+		if info, ok := value.(*EndpointInfo); ok {
+			if endpointKey, ok := key.(*EndpointKey); ok {
+				m[endpointKey.ToIP().String()] = *info
+			}
+		}
+	}
+
+	if err := LXCMap().DumpWithCallback(callback); err != nil {
+		return nil, fmt.Errorf("unable to read BPF endpoint list: %w", err)
+	}
+
+	return m, nil
+}
+
+// lxcmap end
 
 // Identity is the identity representation of an IP<->Identity cache.
 type Identity struct {
@@ -121,6 +467,7 @@ type IPCache struct {
 	identityToIPCache map[identity.NumericIdentity]map[string]struct{}
 	ipToHostIPCache   map[string]IPKeyPair
 	ipToK8sMetadata   map[string]K8sMetadata
+	ipToEndpointInfo  map[string]*LxcEndpointInfo
 
 	listeners []IPIdentityMappingListener
 
@@ -165,6 +512,7 @@ func NewIPCache(c *Configuration) *IPCache {
 		identityToIPCache: map[identity.NumericIdentity]map[string]struct{}{},
 		ipToHostIPCache:   map[string]IPKeyPair{},
 		ipToK8sMetadata:   map[string]K8sMetadata{},
+		ipToEndpointInfo:  map[string]*LxcEndpointInfo{},
 		controllers:       controller.NewManager(),
 		namedPorts:        types.NewNamedPortMultiMap(),
 		metadata:          newMetadata(),
@@ -444,6 +792,7 @@ func (ipc *IPCache) upsertLocked(
 
 	scopedLog.Debug("Upserting IP into ipcache layer")
 
+	ipc.checkLxcMapRelation(ip, hostIP, oldHostIP)
 	// Update both maps.
 	ipc.ipToIdentityCache[ip] = newIdentity
 	// Delete the old identity, if any.
@@ -487,6 +836,13 @@ func (ipc *IPCache) upsertLocked(
 		metricTypeUpsert,
 	).Inc()
 	return namedPortsChanged, nil
+}
+
+func (ipc *IPCache) IsIPcacheOwner(IP string, source source.Source, namespace, name string) (isOwner bool) {
+	ipc.mutex.Lock()
+	defer ipc.mutex.Unlock()
+	k8sMeta := ipc.getK8sMetadata(IP)
+	return k8sMeta != nil && k8sMeta.Namespace == namespace && k8sMeta.PodName == name
 }
 
 // DumpToListener dumps the entire contents of the IPCache by triggering

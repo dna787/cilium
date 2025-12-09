@@ -19,6 +19,7 @@ import (
 type endpointWatcher interface {
 	endpointUpdated(oldC, newC *types.CiliumEndpoint)
 	endpointDeleted(c *types.CiliumEndpoint)
+	endpointIsIPcacheOwner(c *types.CiliumEndpoint) bool
 }
 
 type localEndpointCache interface {
@@ -154,13 +155,19 @@ func (cs *cesSubscriber) deleteCEPfromCES(CEPName, CESName string, c *types.Cili
 			"CEPName": CEPName,
 		}).Debug("CEP deleted, calling endpointDeleted")
 		cs.epWatcher.endpointDeleted(c)
-	} else {
+	} else if cs.epWatcher.endpointIsIPcacheOwner(c) {
 		log.WithFields(logrus.Fields{
 			"CESName": CESName,
 			"CEPName": CEPName,
 		}).Debug("CEP deleted, other CEP exists, calling endpointUpdated")
 		cs.epWatcher.endpointUpdated(c, cep)
+	} else {
+		log.WithFields(logrus.Fields{
+			"CESName": CESName,
+			"CEPName": CEPName,
+		}).Debug("not last CEP deleted and CEP don't own ipcache, skip ipcache changes")
 	}
+
 }
 
 // addCEPwithCES insert CEP with CES to the map and triggers endpointUpdated.

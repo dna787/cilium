@@ -6,8 +6,14 @@ package ciliumendpointslice
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 
+	cilium_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
+	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
 	"github.com/cilium/workerpool"
@@ -18,6 +24,7 @@ import (
 	cilium_api_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	capi_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
@@ -49,9 +56,273 @@ const (
 	// batched and synced together after a short delay.
 	DefaultCESSyncTime = 500 * time.Millisecond
 
+	// Force CES update
+	ForceCESSyncTime = 5 * time.Millisecond
+
 	CESWriteQPSLimitMax = 50
 	CESWriteQPSBurstMax = 100
 )
+
+type cepPriority uint32
+
+const (
+	High    cepPriority = 0
+	Default cepPriority = math.MaxUint32
+)
+
+func (c cepPriority) isLess(rv cepPriority) bool {
+	return c > rv
+}
+
+func equalCeps2(cep0 *cilium_api_v2.CiliumEndpoint, cep1 *coreCiliumEndpointNS) bool {
+	return cep0.Name == cep1.ccep.Name && cep0.Namespace == cep1.ns
+}
+
+func equalCeps(cep0, cep1 *coreCiliumEndpointNS) bool {
+	return cep0.ccep.Name == cep1.ccep.Name && cep0.ns == cep1.ns
+}
+
+func getPriority(s string) cepPriority {
+	if num, err := strconv.ParseUint(s, 10, 32); err == nil {
+		return cepPriority(num)
+	}
+	return Default
+}
+
+type coreCiliumEndpointNS struct {
+	ccep *cilium_v2alpha1.CoreCiliumEndpoint
+	ns   string
+}
+
+type coreCiliumEndpointInfo struct {
+	cep      *coreCiliumEndpointNS
+	priority cepPriority
+}
+
+type priorityFilter struct {
+	mutex       lock.RWMutex
+	ipToCepList map[string][]coreCiliumEndpointInfo
+}
+
+var filter priorityFilter
+var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "filter")
+
+func getCepPriority(cep *cilium_api_v2.CiliumEndpoint) cepPriority {
+	var priority cepPriority = Default
+	for _, lbl := range cep.Status.Identity.Labels {
+		if !strings.Contains(lbl, labels.IDNamePriority) {
+			continue
+		}
+
+		parts := strings.SplitN(lbl, "=", 2)
+		if len(parts) < 2 {
+			continue
+		}
+
+		priority = getPriority(parts[1])
+		break
+	}
+
+	if lbl, exist := cep.Labels[labels.IDNamePriority]; exist {
+		priority = getPriority(lbl)
+	}
+
+	return priority
+}
+
+func getCepAddressPair(cep *cilium_api_v2.CiliumEndpoint) cilium_api_v2.AddressPair {
+	var shared cilium_api_v2.AddressPair
+	for _, pair := range cep.Status.Networking.Addressing {
+		if pair.IPV4 == "" {
+			continue
+		}
+		shared = *pair
+		break
+	}
+	return shared
+}
+
+func (c *priorityFilter) getCoreCiliumEndpoint(cep *cilium_api_v2.CiliumEndpoint) *cilium_v2alpha1.CoreCiliumEndpoint {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	shared := getCepAddressPair(cep)
+	if shared.IPV4 == "" {
+		log.Warn("CEP have not address", logfields.CEPName, cep.Name)
+		return nil
+	}
+
+	cepList, exist := c.ipToCepList[shared.IPV4]
+	if !exist {
+		log.Warn("CEP not found in filter map", logfields.CEPName, cep.Name)
+		return nil
+	}
+
+	var ccep *cilium_v2alpha1.CoreCiliumEndpoint
+	for i := range cepList {
+		if equalCeps2(cep, cepList[i].cep) {
+			ccep = cepList[i].cep.ccep
+			break
+		}
+	}
+	return ccep
+}
+
+func FilterGetCoreCiliumEndpoint(cep *cilium_api_v2.CiliumEndpoint) *cilium_v2alpha1.CoreCiliumEndpoint {
+	return filter.getCoreCiliumEndpoint(cep)
+}
+
+// WARNING this update logic will work only if CEP(new and old) network addresses is not changed !!!
+// If some address was removed in new CEP - it will never removed from map
+// filter support only one ip4 address for pod
+func (c *priorityFilter) filterAddressByPriority(cep *cilium_api_v2.CiliumEndpoint) (*coreCiliumEndpointNS, time.Duration, *coreCiliumEndpointNS) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	ccep := &coreCiliumEndpointNS{
+		ccep: k8s.ConvertCEPToCoreCEP(cep),
+		ns:   cep.GetNamespace(),
+	}
+
+	newOwner := ccep
+	var oldOwner *coreCiliumEndpointNS
+	delay := DefaultCESSyncTime
+
+	shared := getCepAddressPair(cep)
+	if shared.IPV4 == "" {
+		log.Warn("CEP have not address", logfields.CEPName, cep.Name)
+		return oldOwner, delay, newOwner
+	}
+
+	priority := getCepPriority(cep)
+	info := coreCiliumEndpointInfo{
+		cep:      ccep,
+		priority: priority,
+	}
+
+	if cepList, exist := c.ipToCepList[shared.IPV4]; exist {
+		isInserted := false
+		// new cep will have higher priority than old ceps with same priority
+		highest := &info
+		currentOwner := cepList[0].cep
+		for i := range cepList {
+			if len(cepList[i].cep.ccep.Networking.Addressing) != 0 {
+				currentOwner = cepList[i].cep
+			}
+			if equalCeps(ccep, cepList[i].cep) {
+				isInserted = true
+				cepList[i].cep = ccep
+				// forced update only on first appearance
+				if cepList[i].priority != priority && priority == High {
+					delay = ForceCESSyncTime
+				}
+				cepList[i].priority = priority
+			}
+			if highest.priority.isLess(cepList[i].priority) {
+				highest = &cepList[i]
+			}
+		}
+		if !isInserted {
+			if priority == High {
+				delay = ForceCESSyncTime
+			}
+			c.ipToCepList[shared.IPV4] = append(cepList, info)
+		}
+		// possibly cases:
+		// 1) income cep is highest and already ip4 owner(only update income cep)
+		// 2) income cep is highest and replace other owner cep(hide ip4 address for previous owner and make owner income cep)
+		// 3) income cep is lowest and need to be replaced by other cep
+		// 4) income cep is lowest and other cep is already owner
+		emptyAddrList := cilium_api_v2.AddressPairList{}
+		isOwner := equalCeps(ccep, currentOwner)
+		isHighest := equalCeps(ccep, highest.cep)
+		if isOwner && isHighest {
+			// just skip
+			log.Debug("CEP is already address owner", logfields.CEPName, newOwner.ccep.Name)
+		} else if isOwner && !isHighest {
+			ccep.ccep.Networking.Addressing = emptyAddrList
+			addr := &cilium_api_v2.AddressPair{
+				IPV4: shared.IPV4,
+				IPV6: shared.IPV6,
+			}
+			highest.cep.ccep.Networking.Addressing = append(emptyAddrList, addr)
+			oldOwner = ccep
+			newOwner = highest.cep
+			log.Debug("CEP loses ownership of address", logfields.CEPName, oldOwner.ccep.Name, newOwner.ccep.Name)
+		} else if !isOwner && isHighest {
+			currentOwner.ccep.Networking.Addressing = emptyAddrList
+			oldOwner = currentOwner
+			log.Debug("CEP takes ownership of address", logfields.CEPName, newOwner.ccep.Name, oldOwner.ccep.Name)
+		} else { // !isOwner && !isHighest
+			ccep.ccep.Networking.Addressing = emptyAddrList
+			log.Debug("CEP is not address owner", logfields.CEPName, newOwner.ccep.Name)
+		}
+	} else {
+		c.ipToCepList[shared.IPV4] = []coreCiliumEndpointInfo{info}
+		if priority == High {
+			delay = ForceCESSyncTime
+		}
+	}
+	return oldOwner, delay, newOwner
+}
+
+func (c *priorityFilter) removeCEPFromFilter(cep *cilium_api_v2.CiliumEndpoint) *coreCiliumEndpointNS {
+	if cep.Status.Networking == nil || cep.GetName() == "" || cep.Namespace == "" {
+		return nil
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	// filter support only one ip4 address for pod
+	shared := getCepAddressPair(cep)
+	if shared.IPV4 == "" {
+		log.Warn("CEP have not address", logfields.CEPName, cep.Name)
+		return nil
+	}
+
+	ccep := &coreCiliumEndpointNS{
+		ccep: k8s.ConvertCEPToCoreCEP(cep),
+		ns:   cep.GetNamespace(),
+	}
+	var hiddenCep *coreCiliumEndpointNS
+	if cepList, exist := c.ipToCepList[shared.IPV4]; exist {
+		if len(cepList) == 1 {
+			prev := cepList[0]
+			if equalCeps(prev.cep, ccep) {
+				delete(filter.ipToCepList, shared.IPV4)
+			}
+			return nil
+		}
+		needRestoring := false
+		// remove CEP from slice with several elements
+		newList := []coreCiliumEndpointInfo{}
+		for _, prev := range cepList {
+			if !equalCeps(prev.cep, ccep) {
+				newList = append(newList, prev)
+			} else {
+				log.Debug("CEP is removed from filter", logfields.CEPName, cep.Name)
+				// if removed CEP have address - restoring hidden CEP
+				needRestoring = len(prev.cep.ccep.Networking.Addressing) != 0
+			}
+		}
+		c.ipToCepList[shared.IPV4] = newList
+		if !needRestoring {
+			return nil
+		}
+		// find most priorioty hidden cep for restoring its network access
+		highest := &newList[0]
+		for i := 1; i < len(newList); i++ {
+			if newList[i].priority.isLess(highest.priority) {
+				highest = &newList[i]
+			}
+		}
+		hiddenCep = highest.cep
+		hiddenCep.ccep.Networking.Addressing = append(hiddenCep.ccep.Networking.Addressing, &shared)
+		log.Debug("Hidden CEP is restored", logfields.CEPName, hiddenCep.ccep.Name)
+	}
+	return hiddenCep
+}
 
 func (c *Controller) initializeQueue() {
 	c.logger.Info("CES controller workqueue configuration",
@@ -73,31 +344,45 @@ func (c *Controller) onEndpointUpdate(cep *cilium_api_v2.CiliumEndpoint) {
 	if cep.Status.Networking == nil || cep.Status.Identity == nil || cep.GetName() == "" || cep.Namespace == "" {
 		return
 	}
-	touchedCESs := c.manager.UpdateCEPMapping(k8s.ConvertCEPToCoreCEP(cep), cep.Namespace)
-	c.enqueueCESReconciliation(touchedCESs)
+
+	oldOwner, delay, newOwner := filter.filterAddressByPriority(cep)
+	if oldOwner != nil {
+		touchedCESs := c.manager.UpdateCEPMapping(oldOwner.ccep, oldOwner.ns)
+		c.enqueueCESReconciliation(touchedCESs, delay)
+	}
+
+	touchedCESs := c.manager.UpdateCEPMapping(newOwner.ccep, newOwner.ns)
+	c.enqueueCESReconciliation(touchedCESs, delay)
 }
 
 func (c *Controller) onEndpointDelete(cep *cilium_api_v2.CiliumEndpoint) {
+	hiddenCep := filter.removeCEPFromFilter(cep)
+
+	if hiddenCep != nil {
+		touchedCESs := c.manager.UpdateCEPMapping(hiddenCep.ccep, hiddenCep.ns)
+		c.enqueueCESReconciliation(touchedCESs, DefaultCESSyncTime)
+	}
+
 	touchedCES := c.manager.RemoveCEPMapping(k8s.ConvertCEPToCoreCEP(cep), cep.Namespace)
-	c.enqueueCESReconciliation([]CESKey{touchedCES})
+	c.enqueueCESReconciliation([]CESKey{touchedCES}, DefaultCESSyncTime)
 }
 
 func (c *Controller) onSliceUpdate(ces *capi_v2a1.CiliumEndpointSlice) {
-	c.enqueueCESReconciliation([]CESKey{NewCESKey(ces.Name, ces.Namespace)})
+	c.enqueueCESReconciliation([]CESKey{NewCESKey(ces.Name, ces.Namespace)}, DefaultCESSyncTime)
 }
 
 func (c *Controller) onSliceDelete(ces *capi_v2a1.CiliumEndpointSlice) {
-	c.enqueueCESReconciliation([]CESKey{NewCESKey(ces.Name, ces.Namespace)})
+	c.enqueueCESReconciliation([]CESKey{NewCESKey(ces.Name, ces.Namespace)}, DefaultCESSyncTime)
 }
 
-func (c *Controller) addToQueue(ces CESKey) {
+func (c *Controller) addToQueue(ces CESKey, delay time.Duration) {
 	c.priorityNamespacesLock.RLock()
 	_, exists := c.priorityNamespaces[ces.Namespace]
 	c.priorityNamespacesLock.RUnlock()
-	time.AfterFunc(c.syncDelay, func() {
+	time.AfterFunc(delay, func() {
 		c.cond.L.Lock()
 		defer c.cond.L.Unlock()
-		if exists {
+		if exists || delay == ForceCESSyncTime {
 			c.fastQueue.Add(ces)
 		} else {
 			c.standardQueue.Add(ces)
@@ -108,7 +393,7 @@ func (c *Controller) addToQueue(ces CESKey) {
 
 }
 
-func (c *Controller) enqueueCESReconciliation(cess []CESKey) {
+func (c *Controller) enqueueCESReconciliation(cess []CESKey, delay time.Duration) {
 	for _, ces := range cess {
 		c.logger.Debug("Enqueueing CES (if not empty name)", logfields.CESName, ces.string())
 		if ces.Name != "" {
@@ -117,7 +402,7 @@ func (c *Controller) enqueueCESReconciliation(cess []CESKey) {
 				c.enqueuedAt[ces] = time.Now()
 			}
 			c.enqueuedAtLock.Unlock()
-			c.addToQueue(ces)
+			c.addToQueue(ces, delay)
 		}
 	}
 }
@@ -186,6 +471,11 @@ func (c *Controller) Start(ctx cell.HookContext) error {
 			return c.processNamespaceEvents(ctx)
 		}),
 	)
+
+	filter = priorityFilter{
+		ipToCepList: make(map[string][]coreCiliumEndpointInfo),
+	}
+
 	// Start the work pools processing CEP events only after syncing CES in local cache.
 	c.wp = workerpool.New(3)
 	c.wp.Submit("cilium-endpoints-updater", c.runCiliumEndpointsUpdater)

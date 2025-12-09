@@ -287,3 +287,18 @@ func (k *K8sCiliumEndpointsWatcher) endpointDeleted(endpoint *types.CiliumEndpoi
 	}
 	hubblemetrics.ProcessCiliumEndpointDeletion(endpoint)
 }
+
+func (k *K8sCiliumEndpointsWatcher) endpointIsIPcacheOwner(c *types.CiliumEndpoint) bool {
+	isOwner := true
+	if c.Networking != nil {
+		for _, pair := range c.Networking.Addressing {
+			if pair.IPV4 != "" {
+				isOwner = k.ipcache.IsIPcacheOwner(pair.IPV4, source.CustomResource, c.Namespace, c.Name)
+				if !isOwner {
+					break
+				}
+			}
+		}
+	}
+	return isOwner
+}

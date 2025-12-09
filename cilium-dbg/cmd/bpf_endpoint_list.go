@@ -10,7 +10,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/command"
 	"github.com/cilium/cilium/pkg/common"
-	"github.com/cilium/cilium/pkg/maps/lxcmap"
+	lxcmap "github.com/cilium/cilium/pkg/ipcache"
 )
 
 const (

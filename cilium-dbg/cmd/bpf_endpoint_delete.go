@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cilium/cilium/pkg/common"
-	"github.com/cilium/cilium/pkg/maps/lxcmap"
+	lxcmap "github.com/cilium/cilium/pkg/ipcache"
 )
 
 var bpfEndpointDeleteCmd = &cobra.Command{
