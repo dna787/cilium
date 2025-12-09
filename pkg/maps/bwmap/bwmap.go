@@ -11,7 +11,7 @@ import (
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/ebpf"
-	"github.com/cilium/cilium/pkg/maps/lxcmap"
+	lxcmap "github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/time"
 )
 

@@ -95,6 +95,7 @@ func transformToCiliumEndpoint(obj interface{}) (interface{}, error) {
 				ResourceVersion: concreteObj.ResourceVersion,
 				OwnerReferences: concreteObj.OwnerReferences,
 				UID:             concreteObj.UID,
+				Labels:          concreteObj.Labels,
 			},
 			Status: cilium_api_v2.EndpointStatus{
 				Identity:   concreteObj.Status.Identity,

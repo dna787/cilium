@@ -13,12 +13,6 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/cilium/hive/job"
-	"github.com/cilium/statedb"
-	"github.com/sirupsen/logrus"
-	"github.com/vishvananda/netlink"
-	"golang.org/x/sync/semaphore"
-
 	"github.com/cilium/cilium/api/v1/models"
 	health "github.com/cilium/cilium/cilium-health/launch"
 	"github.com/cilium/cilium/daemon/cmd/cni"
@@ -80,6 +74,11 @@ import (
 	"github.com/cilium/cilium/pkg/status"
 	"github.com/cilium/cilium/pkg/time"
 	wireguard "github.com/cilium/cilium/pkg/wireguard/agent"
+	"github.com/cilium/hive/job"
+	"github.com/cilium/statedb"
+	"github.com/sirupsen/logrus"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sync/semaphore"
 )
 
 const (
@@ -410,6 +409,8 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		ctMapGC:           params.CTNATMapGC,
 		maglevConfig:      params.MaglevConfig,
 	}
+
+	ipcache.SetGlobalIPCache(d.ipcache)
 
 	// initialize endpointRestoreComplete channel as soon as possible so that subsystems
 	// can wait on it to get closed and not block forever if they happen so start

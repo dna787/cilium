@@ -11,7 +11,6 @@ import (
 
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2alpha1"
@@ -188,7 +187,7 @@ func (r *reconciler) reconcileCESDelete(ces *cilium_v2a1.CiliumEndpointSlice) (e
 func (r *reconciler) getCoreEndpointFromStore(cepName CEPName) *cilium_v2a1.CoreCiliumEndpoint {
 	cepObj, exists, err := r.cepStore.GetByKey(cepName.key())
 	if err == nil && exists {
-		return k8s.ConvertCEPToCoreCEP(cepObj)
+		return FilterGetCoreCiliumEndpoint(cepObj)
 	}
 	r.logger.Debug(fmt.Sprintf("Couldn't get CEP from Store (err=%v, exists=%v)", err, exists), logfields.CEPName, cepName.string())
 	return nil

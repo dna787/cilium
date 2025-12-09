@@ -81,6 +81,10 @@ const (
 	// IDNameUnknown is the label used to to identify an endpoint with an
 	// unknown identity.
 	IDNameUnknown = "unknown"
+
+	// IDNamePriority is the label used to set pod priority on shared ip4-address
+	// network access
+	IDNamePriority = "network.deckhouse.io/pod-common-ip-priority"
 )
 
 var (
