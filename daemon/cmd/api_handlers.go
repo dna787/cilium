@@ -23,6 +23,7 @@ type handlersOut struct {
 
 	DaemonGetDebuginfoHandler daemon.GetDebuginfoHandler
 	DaemonGetHealthzHandler   daemon.GetHealthzHandler
+	DaemonGetIncHandler       daemon.GetIncHandler
 
 	EndpointDeleteEndpointHandler        endpoint.DeleteEndpointHandler
 	EndpointDeleteEndpointIDHandler      endpoint.DeleteEndpointIDHandler
@@ -85,6 +86,9 @@ func wrapAPIHandler[Params any](dp promise.Promise[*Daemon], handler func(d *Dae
 func ciliumAPIHandlers(dp promise.Promise[*Daemon], cfg *option.DaemonConfig, _ *deletionQueue) (out handlersOut) {
 	// /healthz/
 	out.DaemonGetHealthzHandler = wrapAPIHandler(dp, getHealthzHandler)
+
+	// /inc
+	out.DaemonGetIncHandler = wrapAPIHandler(dp, getIncHandler)
 
 	// /endpoint/
 	out.EndpointDeleteEndpointHandler = wrapAPIHandler(dp, deleteEndpointHandler)

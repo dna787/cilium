@@ -93,6 +93,7 @@ type apiParams struct {
 	PolicyGetIdentityHandler             policy.GetIdentityHandler
 	PolicyGetIdentityEndpointsHandler    policy.GetIdentityEndpointsHandler
 	PolicyGetIdentityIDHandler           policy.GetIdentityIDHandler
+	DaemonGetIncHandler                  daemon.GetIncHandler
 	ServiceGetLrpHandler                 service.GetLrpHandler
 	DaemonGetMapHandler                  daemon.GetMapHandler
 	DaemonGetMapNameHandler              daemon.GetMapNameHandler
@@ -153,6 +154,7 @@ func newAPI(p apiParams) *restapi.CiliumAPIAPI {
 	api.PolicyGetIdentityHandler = p.PolicyGetIdentityHandler
 	api.PolicyGetIdentityEndpointsHandler = p.PolicyGetIdentityEndpointsHandler
 	api.PolicyGetIdentityIDHandler = p.PolicyGetIdentityIDHandler
+	api.DaemonGetIncHandler = p.DaemonGetIncHandler
 	api.ServiceGetLrpHandler = p.ServiceGetLrpHandler
 	api.DaemonGetMapHandler = p.DaemonGetMapHandler
 	api.DaemonGetMapNameHandler = p.DaemonGetMapNameHandler

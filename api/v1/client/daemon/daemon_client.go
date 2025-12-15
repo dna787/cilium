@@ -70,6 +70,8 @@ type ClientService interface {
 
 	GetHealthz(params *GetHealthzParams, opts ...ClientOption) (*GetHealthzOK, error)
 
+	GetInc(params *GetIncParams, opts ...ClientOption) (*GetIncOK, error)
+
 	GetMap(params *GetMapParams, opts ...ClientOption) (*GetMapOK, error)
 
 	GetMapName(params *GetMapNameParams, opts ...ClientOption) (*GetMapNameOK, error)
@@ -277,6 +279,44 @@ func (a *Client) GetHealthz(params *GetHealthzParams, opts ...ClientOption) (*Ge
 	// unexpected success response
 	// safeguard: normally, absent a default response, unknown success responses return an error above: so this is a codegen issue
 	msg := fmt.Sprintf("unexpected success response for GetHealthz: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
+}
+
+/*
+GetInc increments a number by 1
+*/
+func (a *Client) GetInc(params *GetIncParams, opts ...ClientOption) (*GetIncOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewGetIncParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "GetInc",
+		Method:             "GET",
+		PathPattern:        "/inc",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetIncReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+	success, ok := result.(*GetIncOK)
+	if ok {
+		return success, nil
+	}
+	// unexpected success response
+	// safeguard: normally, absent a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for GetInc: API contract not enforced by server. Client expected to get an error, but got: %T", result)
 	panic(msg)
 }
 

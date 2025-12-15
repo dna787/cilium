@@ -984,6 +984,31 @@ func init() {
         }
       }
     },
+    "/inc": {
+      "get": {
+        "tags": [
+          "daemon"
+        ],
+        "summary": "Increment a number by 1",
+        "parameters": [
+          {
+            "type": "integer",
+            "description": "Number to increment",
+            "name": "x",
+            "in": "query",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": {
+              "$ref": "#/definitions/IncResponse"
+            }
+          }
+        }
+      }
+    },
     "/ip": {
       "get": {
         "description": "Retrieves a list of IPs with known associated information such as\ntheir identities, host addresses, Kubernetes pod names, etc.\nThe list can optionally filtered by a CIDR IP range.\n",
@@ -3640,6 +3665,18 @@ func init() {
         },
         "min-identity": {
           "description": "Minimum identity of the cluster",
+          "type": "integer"
+        }
+      }
+    },
+    "IncResponse": {
+      "description": "Simple increment response",
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "value": {
           "type": "integer"
         }
       }
@@ -6583,6 +6620,31 @@ func init() {
         }
       }
     },
+    "/inc": {
+      "get": {
+        "tags": [
+          "daemon"
+        ],
+        "summary": "Increment a number by 1",
+        "parameters": [
+          {
+            "type": "integer",
+            "description": "Number to increment",
+            "name": "x",
+            "in": "query",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": {
+              "$ref": "#/definitions/IncResponse"
+            }
+          }
+        }
+      }
+    },
     "/ip": {
       "get": {
         "description": "Retrieves a list of IPs with known associated information such as\ntheir identities, host addresses, Kubernetes pod names, etc.\nThe list can optionally filtered by a CIDR IP range.\n",
@@ -9461,6 +9523,18 @@ func init() {
         },
         "min-identity": {
           "description": "Minimum identity of the cluster",
+          "type": "integer"
+        }
+      }
+    },
+    "IncResponse": {
+      "description": "Simple increment response",
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "value": {
           "type": "integer"
         }
       }

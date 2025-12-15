@@ -484,6 +484,13 @@ func getHealthzHandler(d *Daemon, params GetHealthzParams) middleware.Responder 
 	return NewGetHealthzOK().WithPayload(&sr)
 }
 
+func getIncHandler(d *Daemon, params GetIncParams) middleware.Responder {
+	fmt.Printf("DEBUG getIncHandler\n")
+	newVal := params.X + 1
+	sr := models.IncResponse{Value: &newVal}
+	return NewGetIncOK().WithPayload(&sr)
+}
+
 // getStatus returns the daemon status. If brief is provided a minimal version
 // of the StatusResponse is provided.
 func (d *Daemon) getStatus(brief bool, requireK8sConnectivity bool) models.StatusResponse {

@@ -12,6 +12,22 @@ produces:
 consumes:
 - application/json
 paths:
+  "/inc":
+    get:
+      summary: Increment a number by 1
+      tags:
+      - daemon
+      parameters:
+      - name: x
+        description: Number to increment
+        in: query
+        required: true
+        type: integer
+      responses:
+        '200':
+          description: Success
+          schema:
+            "$ref": "#/definitions/IncResponse"
   "/cluster/nodes":
     get:
       summary: Get nodes information stored in the cilium-agent
@@ -4165,3 +4181,11 @@ definitions:
     type: array
     items:
       "$ref": "#/definitions/Label"
+  IncResponse:
+    description: Simple increment response
+    type: object
+    properties:
+      value:
+        type: integer
+    required:
+      - value
