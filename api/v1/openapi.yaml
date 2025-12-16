@@ -12,6 +12,16 @@ produces:
 consumes:
 - application/json
 paths:
+  "/conntrack/import":
+    post:
+      summary: Import conntrack entries as NDJSON stream
+      tags:
+        - daemon
+      consumes:
+        - application/x-ndjson
+      responses:
+        '200':
+          description: OK
   "/inc":
     get:
       summary: Increment a number by 1

@@ -4,11 +4,15 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 
+	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/strfmt"
 	"github.com/sirupsen/logrus"
@@ -489,6 +493,64 @@ func getIncHandler(d *Daemon, params GetIncParams) middleware.Responder {
 	newVal := params.X + 1
 	sr := models.IncResponse{Value: &newVal}
 	return NewGetIncOK().WithPayload(&sr)
+}
+
+type Example struct {
+	ID    int    `json:"id"`
+	Value string `json:"value"`
+}
+
+func postConntrackImportHandler(
+	d *Daemon,
+	params PostConntrackImportParams,
+) middleware.Responder {
+	return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
+		r := params.HTTPRequest
+		defer r.Body.Close()
+
+		fmt.Printf("DEBUG postConntrackImportHandler\n")
+		scanner := bufio.NewScanner(r.Body)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			fmt.Printf("DEBUG - new lines %s\n", line)
+		}
+
+		if err := scanner.Err(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.WriteHeader(http.StatusOK)
+
+		// if rw, ok := w.(*metrics.ResponderWrapper); ok {
+		// 	w = rw.ResponseWriter
+		// }
+		// flusher, ok := w.(http.Flusher)
+
+		// Stream 10 JSON objects, one per line
+		for i := 1; i <= 10; i++ {
+			data := Example{
+				ID:    i,
+				Value: fmt.Sprintf("value-%d", i),
+			}
+
+			line, err := json.Marshal(data)
+			if err != nil {
+				http.Error(w, "JSON encoding error", http.StatusInternalServerError)
+				return
+			}
+
+			// Write the line + newline
+			w.Write(line)
+			w.Write([]byte("\n"))
+
+			// if ok {
+			// 	flusher.Flush()
+			// }
+		}
+	})
 }
 
 // getStatus returns the daemon status. If brief is provided a minimal version

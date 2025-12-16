@@ -198,6 +198,9 @@ func NewCiliumAPIAPI(spec *loads.Document) *CiliumAPIAPI {
 		PrefilterPatchPrefilterHandler: prefilter.PatchPrefilterHandlerFunc(func(params prefilter.PatchPrefilterParams) middleware.Responder {
 			return middleware.NotImplemented("operation prefilter.PatchPrefilter has not yet been implemented")
 		}),
+		DaemonPostConntrackImportHandler: daemon.PostConntrackImportHandlerFunc(func(params daemon.PostConntrackImportParams) middleware.Responder {
+			return middleware.NotImplemented("operation daemon.PostConntrackImport has not yet been implemented")
+		}),
 		IpamPostIpamHandler: ipam.PostIpamHandlerFunc(func(params ipam.PostIpamParams) middleware.Responder {
 			return middleware.NotImplemented("operation ipam.PostIpam has not yet been implemented")
 		}),
@@ -246,6 +249,7 @@ type CiliumAPIAPI struct {
 
 	// JSONConsumer registers a consumer for the following mime types:
 	//   - application/json
+	//   - application/x-ndjson
 	JSONConsumer runtime.Consumer
 
 	// JSONProducer registers a producer for the following mime types:
@@ -348,6 +352,8 @@ type CiliumAPIAPI struct {
 	EndpointPatchEndpointIDLabelsHandler endpoint.PatchEndpointIDLabelsHandler
 	// PrefilterPatchPrefilterHandler sets the operation handler for the patch prefilter operation
 	PrefilterPatchPrefilterHandler prefilter.PatchPrefilterHandler
+	// DaemonPostConntrackImportHandler sets the operation handler for the post conntrack import operation
+	DaemonPostConntrackImportHandler daemon.PostConntrackImportHandler
 	// IpamPostIpamHandler sets the operation handler for the post ipam operation
 	IpamPostIpamHandler ipam.PostIpamHandler
 	// IpamPostIpamIPHandler sets the operation handler for the post ipam IP operation
@@ -581,6 +587,9 @@ func (o *CiliumAPIAPI) Validate() error {
 	if o.PrefilterPatchPrefilterHandler == nil {
 		unregistered = append(unregistered, "prefilter.PatchPrefilterHandler")
 	}
+	if o.DaemonPostConntrackImportHandler == nil {
+		unregistered = append(unregistered, "daemon.PostConntrackImportHandler")
+	}
 	if o.IpamPostIpamHandler == nil {
 		unregistered = append(unregistered, "ipam.PostIpamHandler")
 	}
@@ -630,6 +639,8 @@ func (o *CiliumAPIAPI) ConsumersFor(mediaTypes []string) map[string]runtime.Cons
 		switch mt {
 		case "application/json":
 			result["application/json"] = o.JSONConsumer
+		case "application/x-ndjson":
+			result["application/x-ndjson"] = o.JSONConsumer
 		}
 
 		if c, ok := o.customConsumers[mt]; ok {
@@ -879,6 +890,10 @@ func (o *CiliumAPIAPI) initHandlerCache() {
 		o.handlers["PATCH"] = make(map[string]http.Handler)
 	}
 	o.handlers["PATCH"]["/prefilter"] = prefilter.NewPatchPrefilter(o.context, o.PrefilterPatchPrefilterHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/conntrack/import"] = daemon.NewPostConntrackImport(o.context, o.DaemonPostConntrackImportHandler)
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}

@@ -112,6 +112,7 @@ type apiParams struct {
 	EndpointPatchEndpointIDConfigHandler endpoint.PatchEndpointIDConfigHandler
 	EndpointPatchEndpointIDLabelsHandler endpoint.PatchEndpointIDLabelsHandler
 	PrefilterPatchPrefilterHandler       prefilter.PatchPrefilterHandler
+	DaemonPostConntrackImportHandler     daemon.PostConntrackImportHandler
 	IpamPostIpamHandler                  ipam.PostIpamHandler
 	IpamPostIpamIPHandler                ipam.PostIpamIPHandler
 	EndpointPutEndpointIDHandler         endpoint.PutEndpointIDHandler
@@ -173,6 +174,7 @@ func newAPI(p apiParams) *restapi.CiliumAPIAPI {
 	api.EndpointPatchEndpointIDConfigHandler = p.EndpointPatchEndpointIDConfigHandler
 	api.EndpointPatchEndpointIDLabelsHandler = p.EndpointPatchEndpointIDLabelsHandler
 	api.PrefilterPatchPrefilterHandler = p.PrefilterPatchPrefilterHandler
+	api.DaemonPostConntrackImportHandler = p.DaemonPostConntrackImportHandler
 	api.IpamPostIpamHandler = p.IpamPostIpamHandler
 	api.IpamPostIpamIPHandler = p.IpamPostIpamIPHandler
 	api.EndpointPutEndpointIDHandler = p.EndpointPutEndpointIDHandler

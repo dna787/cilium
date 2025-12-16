@@ -13,6 +13,7 @@
 //
 //	Consumes:
 //	  - application/json
+//	  - application/x-ndjson
 //
 //	Produces:
 //	  - application/json

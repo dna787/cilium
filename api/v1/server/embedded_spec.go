@@ -258,6 +258,22 @@ func init() {
         }
       }
     },
+    "/conntrack/import": {
+      "post": {
+        "consumes": [
+          "application/x-ndjson"
+        ],
+        "tags": [
+          "daemon"
+        ],
+        "summary": "Import conntrack entries as NDJSON stream",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/debuginfo": {
       "get": {
         "tags": [
@@ -5796,6 +5812,22 @@ func init() {
               "$ref": "#/definitions/Error"
             },
             "x-go-name": "Failure"
+          }
+        }
+      }
+    },
+    "/conntrack/import": {
+      "post": {
+        "consumes": [
+          "application/x-ndjson"
+        ],
+        "tags": [
+          "daemon"
+        ],
+        "summary": "Import conntrack entries as NDJSON stream",
+        "responses": {
+          "200": {
+            "description": "OK"
           }
         }
       }

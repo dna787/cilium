@@ -21,9 +21,10 @@ import (
 type handlersOut struct {
 	cell.Out
 
-	DaemonGetDebuginfoHandler daemon.GetDebuginfoHandler
-	DaemonGetHealthzHandler   daemon.GetHealthzHandler
-	DaemonGetIncHandler       daemon.GetIncHandler
+	DaemonGetDebuginfoHandler        daemon.GetDebuginfoHandler
+	DaemonGetHealthzHandler          daemon.GetHealthzHandler
+	DaemonGetIncHandler              daemon.GetIncHandler
+	DaemonPostConntrackImportHandler daemon.PostConntrackImportHandler
 
 	EndpointDeleteEndpointHandler        endpoint.DeleteEndpointHandler
 	EndpointDeleteEndpointIDHandler      endpoint.DeleteEndpointIDHandler
@@ -89,6 +90,8 @@ func ciliumAPIHandlers(dp promise.Promise[*Daemon], cfg *option.DaemonConfig, _ 
 
 	// /inc
 	out.DaemonGetIncHandler = wrapAPIHandler(dp, getIncHandler)
+
+	out.DaemonPostConntrackImportHandler = wrapAPIHandler(dp, postConntrackImportHandler)
 
 	// /endpoint/
 	out.EndpointDeleteEndpointHandler = wrapAPIHandler(dp, deleteEndpointHandler)
