@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	. "github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/backoff"
+	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
@@ -33,6 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	ipmasqmap "github.com/cilium/cilium/pkg/maps/ipmasq"
 	"github.com/cilium/cilium/pkg/maps/lbmap"
@@ -40,10 +43,12 @@ import (
 	"github.com/cilium/cilium/pkg/maps/ratelimitmap"
 	"github.com/cilium/cilium/pkg/maps/timestamp"
 	tunnelmap "github.com/cilium/cilium/pkg/maps/tunnel"
+	"github.com/cilium/cilium/pkg/metrics"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/status"
 	"github.com/cilium/cilium/pkg/time"
+	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/version"
 )
 
@@ -549,6 +554,128 @@ func postConntrackImportHandler(
 			// if ok {
 			// 	flusher.Flush()
 			// }
+		}
+	})
+}
+
+func getCtMaps() []*ctmap.Map {
+	// our cilium build really support only ipv4
+	ipv4, ipv6 := true, false
+	return ctmap.GlobalMaps(ipv4, ipv6)
+}
+
+func parseIPv4ToBinary(s string) (types.IPv4, error) {
+	var out types.IPv4
+
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return out, fmt.Errorf("invalid IP: %s", s)
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return out, fmt.Errorf("not an IPv4 address: %s", s)
+	}
+
+	copy(out[:], ip4)
+	return out, nil
+}
+
+func getConntrackExportHandler(
+	d *Daemon,
+	params GetConntrackExportParams,
+) middleware.Responder {
+	return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
+		r := params.HTTPRequest
+		ctx := r.Context()
+		defer r.Body.Close()
+
+		ip4, err := parseIPv4ToBinary(params.IP)
+		if err != nil {
+			http.Error(w, "Failed parse ipv4 address", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.WriteHeader(http.StatusOK)
+
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+
+		if rw, ok := w.(*metrics.ResponderWrapper); ok {
+			w = rw.ResponseWriter
+		}
+		flusher, isFlusherExists := w.(http.Flusher)
+
+		isConnClosed := false
+		maps := getCtMaps()
+		for _, m := range maps {
+			path, err := ctmap.OpenCTMap(m)
+			if err != nil {
+				log.WithFields(logrus.Fields{
+					"map":   m,
+					"path":  path,
+					"error": err,
+				}).Debug("Failed to open conntrack map")
+				continue
+			}
+			defer m.Close()
+
+			ds := bpf.NewDumpStats(&m.Map)
+			callback := func(key bpf.MapKey, value bpf.MapValue) bool {
+				select {
+				case <-ctx.Done():
+					isConnClosed = true
+					return true
+				default:
+				}
+
+				// periodically force sending small amounts of buffering data
+				if isFlusherExists && ds.Lookup%5000 == 0 {
+					flusher.Flush()
+				}
+
+				key4, ok := key.(*ctmap.CtKey4Global)
+				if !ok {
+					return false
+				}
+
+				flags := key4.GetFlags()
+				src, dst := key4.SourceAddr, key4.DestAddr
+				isIngress := flags&ctmap.TUPLE_F_IN != 0 || flags&ctmap.TUPLE_F_SERVICE != 0
+				isEgress := flags == ctmap.TUPLE_F_OUT
+				if !(isIngress && ip4 == src || isEgress && ip4 == dst) {
+					return false
+				}
+
+				record := ctmap.CtMapRecord{Key: key4, Value: *value.(*ctmap.CtEntry)}
+				if err := enc.Encode(record); err != nil {
+					log.WithFields(logrus.Fields{
+						"map":   m,
+						"path":  path,
+						"error": err,
+					}).Debug("Failed to encode json and write to socket")
+					isConnClosed = true
+					return true
+				}
+				return false
+			}
+
+			if err = m.DumpReliablyWithCallbackErr(callback, ds); err != nil {
+				log.WithFields(logrus.Fields{
+					"map":   m,
+					"path":  path,
+					"error": err,
+				}).Debug("DumpReliablyWithCallbackErr have error")
+			}
+
+			log.Info(ds)
+
+			if isConnClosed {
+				log.Debug("HTTP client closed connection")
+				break
+			}
 		}
 	})
 }

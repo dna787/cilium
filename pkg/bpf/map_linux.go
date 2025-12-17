@@ -599,6 +599,7 @@ func (m *Map) NextKey(key, nextKeyOut interface{}) error {
 }
 
 type DumpCallback func(key MapKey, value MapValue)
+type DumpCallbackErr func(MapKey, MapValue) bool
 
 // DumpWithCallback iterates over the Map and calls the given DumpCallback for
 // each map entry. With the current implementation, it is safe for callbacks to
@@ -648,6 +649,14 @@ func (m *Map) DumpWithCallbackIfExists(cb DumpCallback) error {
 	return nil
 }
 
+func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error {
+	wrapper := func(k MapKey, v MapValue) bool {
+		cb(k, v)
+		return false
+	}
+	return m.DumpReliablyWithCallbackErr(wrapper, stats)
+}
+
 // DumpReliablyWithCallback is similar to DumpWithCallback, but performs
 // additional tracking of the current and recently seen keys, so that if an
 // element is removed from the underlying kernel map during the dump, the dump
@@ -657,7 +666,7 @@ func (m *Map) DumpWithCallbackIfExists(cb DumpCallback) error {
 //
 // The caller must provide a callback for handling each entry, and a stats
 // object initialized via a call to NewDumpStats().
-func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error {
+func (m *Map) DumpReliablyWithCallbackErr(cb DumpCallbackErr, stats *DumpStats) error {
 	if cb == nil {
 		return errors.New("empty callback")
 	}
@@ -735,7 +744,9 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 			continue
 		}
 
-		cb(currentKey, value)
+		if isDone := cb(currentKey, value); isDone {
+			return nil
+		}
 
 		if nextKeyErr != nil {
 			if errors.Is(nextKeyErr, ebpf.ErrKeyNotExist) {

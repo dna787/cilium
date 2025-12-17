@@ -78,6 +78,7 @@ type apiParams struct {
 	DaemonGetCgroupDumpMetadataHandler   daemon.GetCgroupDumpMetadataHandler
 	DaemonGetClusterNodesHandler         daemon.GetClusterNodesHandler
 	DaemonGetConfigHandler               daemon.GetConfigHandler
+	DaemonGetConntrackExportHandler      daemon.GetConntrackExportHandler
 	DaemonGetDebuginfoHandler            daemon.GetDebuginfoHandler
 	EndpointGetEndpointHandler           endpoint.GetEndpointHandler
 	EndpointGetEndpointIDHandler         endpoint.GetEndpointIDHandler
@@ -140,6 +141,7 @@ func newAPI(p apiParams) *restapi.CiliumAPIAPI {
 	api.DaemonGetCgroupDumpMetadataHandler = p.DaemonGetCgroupDumpMetadataHandler
 	api.DaemonGetClusterNodesHandler = p.DaemonGetClusterNodesHandler
 	api.DaemonGetConfigHandler = p.DaemonGetConfigHandler
+	api.DaemonGetConntrackExportHandler = p.DaemonGetConntrackExportHandler
 	api.DaemonGetDebuginfoHandler = p.DaemonGetDebuginfoHandler
 	api.EndpointGetEndpointHandler = p.EndpointGetEndpointHandler
 	api.EndpointGetEndpointIDHandler = p.EndpointGetEndpointIDHandler

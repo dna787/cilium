@@ -6,6 +6,8 @@
 package bpf
 
 import (
+	"fmt"
+
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -62,4 +64,27 @@ func (d *DumpStats) finish() {
 // Duration returns the duration of the dump.
 func (d *DumpStats) Duration() time.Duration {
 	return d.Finished.Sub(d.Started)
+}
+
+func (s *DumpStats) String() string {
+	dur := s.Duration()
+
+	status := "aborted"
+	switch {
+	case s.Completed:
+		status = "completed"
+	case s.LookupFailed > 0:
+		status = "failed"
+	}
+
+	return fmt.Sprintf(
+		"map dump %s (duration=%s lookups=%d failed=%d fallback=%d interrupted=%d maxEntries=%d)",
+		status,
+		dur.Round(time.Millisecond),
+		s.Lookup,
+		s.LookupFailed,
+		s.KeyFallback,
+		s.Interrupted,
+		s.MaxEntries,
+	)
 }

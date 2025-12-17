@@ -17,6 +17,7 @@
 //
 //	Produces:
 //	  - application/json
+//	  - application/x-ndjson
 //
 // swagger:meta
 package server

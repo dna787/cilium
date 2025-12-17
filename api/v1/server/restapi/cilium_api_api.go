@@ -96,6 +96,9 @@ func NewCiliumAPIAPI(spec *loads.Document) *CiliumAPIAPI {
 		DaemonGetConfigHandler: daemon.GetConfigHandlerFunc(func(params daemon.GetConfigParams) middleware.Responder {
 			return middleware.NotImplemented("operation daemon.GetConfig has not yet been implemented")
 		}),
+		DaemonGetConntrackExportHandler: daemon.GetConntrackExportHandlerFunc(func(params daemon.GetConntrackExportParams) middleware.Responder {
+			return middleware.NotImplemented("operation daemon.GetConntrackExport has not yet been implemented")
+		}),
 		DaemonGetDebuginfoHandler: daemon.GetDebuginfoHandlerFunc(func(params daemon.GetDebuginfoParams) middleware.Responder {
 			return middleware.NotImplemented("operation daemon.GetDebuginfo has not yet been implemented")
 		}),
@@ -254,6 +257,7 @@ type CiliumAPIAPI struct {
 
 	// JSONProducer registers a producer for the following mime types:
 	//   - application/json
+	//   - application/x-ndjson
 	JSONProducer runtime.Producer
 
 	// EndpointDeleteEndpointHandler sets the operation handler for the delete endpoint operation
@@ -284,6 +288,8 @@ type CiliumAPIAPI struct {
 	DaemonGetClusterNodesHandler daemon.GetClusterNodesHandler
 	// DaemonGetConfigHandler sets the operation handler for the get config operation
 	DaemonGetConfigHandler daemon.GetConfigHandler
+	// DaemonGetConntrackExportHandler sets the operation handler for the get conntrack export operation
+	DaemonGetConntrackExportHandler daemon.GetConntrackExportHandler
 	// DaemonGetDebuginfoHandler sets the operation handler for the get debuginfo operation
 	DaemonGetDebuginfoHandler daemon.GetDebuginfoHandler
 	// EndpointGetEndpointHandler sets the operation handler for the get endpoint operation
@@ -485,6 +491,9 @@ func (o *CiliumAPIAPI) Validate() error {
 	if o.DaemonGetConfigHandler == nil {
 		unregistered = append(unregistered, "daemon.GetConfigHandler")
 	}
+	if o.DaemonGetConntrackExportHandler == nil {
+		unregistered = append(unregistered, "daemon.GetConntrackExportHandler")
+	}
 	if o.DaemonGetDebuginfoHandler == nil {
 		unregistered = append(unregistered, "daemon.GetDebuginfoHandler")
 	}
@@ -658,6 +667,8 @@ func (o *CiliumAPIAPI) ProducersFor(mediaTypes []string) map[string]runtime.Prod
 		switch mt {
 		case "application/json":
 			result["application/json"] = o.JSONProducer
+		case "application/x-ndjson":
+			result["application/x-ndjson"] = o.JSONProducer
 		}
 
 		if p, ok := o.customProducers[mt]; ok {
@@ -754,6 +765,10 @@ func (o *CiliumAPIAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/config"] = daemon.NewGetConfig(o.context, o.DaemonGetConfigHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/conntrack/export"] = daemon.NewGetConntrackExport(o.context, o.DaemonGetConntrackExportHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}

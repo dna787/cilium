@@ -258,6 +258,32 @@ func init() {
         }
       }
     },
+    "/conntrack/export": {
+      "get": {
+        "produces": [
+          "application/x-ndjson"
+        ],
+        "tags": [
+          "daemon"
+        ],
+        "summary": "Export conntrack entries for an IPv4 endpoint",
+        "parameters": [
+          {
+            "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}$",
+            "type": "string",
+            "description": "IPv4 address of the endpoint",
+            "name": "ip",
+            "in": "query",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NDJSON stream of conntrack entries"
+          }
+        }
+      }
+    },
     "/conntrack/import": {
       "post": {
         "consumes": [
@@ -5812,6 +5838,32 @@ func init() {
               "$ref": "#/definitions/Error"
             },
             "x-go-name": "Failure"
+          }
+        }
+      }
+    },
+    "/conntrack/export": {
+      "get": {
+        "produces": [
+          "application/x-ndjson"
+        ],
+        "tags": [
+          "daemon"
+        ],
+        "summary": "Export conntrack entries for an IPv4 endpoint",
+        "parameters": [
+          {
+            "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}$",
+            "type": "string",
+            "description": "IPv4 address of the endpoint",
+            "name": "ip",
+            "in": "query",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NDJSON stream of conntrack entries"
           }
         }
       }

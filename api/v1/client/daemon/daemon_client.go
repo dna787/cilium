@@ -82,6 +82,26 @@ func WithContentTypeApplicationxNdjson(r *runtime.ClientOperation) {
 	r.ConsumesMediaTypes = []string{"application/x-ndjson"}
 }
 
+// WithAccept allows the client to force the Accept header
+// to negotiate a specific Producer from the server.
+//
+// You may use this option to set arbitrary extensions to your MIME media type.
+func WithAccept(mime string) ClientOption {
+	return func(r *runtime.ClientOperation) {
+		r.ProducesMediaTypes = []string{mime}
+	}
+}
+
+// WithAcceptApplicationJSON sets the Accept header to "application/json".
+func WithAcceptApplicationJSON(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"application/json"}
+}
+
+// WithAcceptApplicationxNdjson sets the Accept header to "application/x-ndjson".
+func WithAcceptApplicationxNdjson(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"application/x-ndjson"}
+}
+
 // ClientService is the interface for Client methods
 type ClientService interface {
 	GetCgroupDumpMetadata(params *GetCgroupDumpMetadataParams, opts ...ClientOption) (*GetCgroupDumpMetadataOK, error)
@@ -89,6 +109,8 @@ type ClientService interface {
 	GetClusterNodes(params *GetClusterNodesParams, opts ...ClientOption) (*GetClusterNodesOK, error)
 
 	GetConfig(params *GetConfigParams, opts ...ClientOption) (*GetConfigOK, error)
+
+	GetConntrackExport(params *GetConntrackExportParams, opts ...ClientOption) (*GetConntrackExportOK, error)
 
 	GetDebuginfo(params *GetDebuginfoParams, opts ...ClientOption) (*GetDebuginfoOK, error)
 
@@ -224,6 +246,44 @@ func (a *Client) GetConfig(params *GetConfigParams, opts ...ClientOption) (*GetC
 	// unexpected success response
 	// safeguard: normally, absent a default response, unknown success responses return an error above: so this is a codegen issue
 	msg := fmt.Sprintf("unexpected success response for GetConfig: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
+}
+
+/*
+GetConntrackExport exports conntrack entries for an IPv4 endpoint
+*/
+func (a *Client) GetConntrackExport(params *GetConntrackExportParams, opts ...ClientOption) (*GetConntrackExportOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewGetConntrackExportParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "GetConntrackExport",
+		Method:             "GET",
+		PathPattern:        "/conntrack/export",
+		ProducesMediaTypes: []string{"application/x-ndjson"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetConntrackExportReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+	success, ok := result.(*GetConntrackExportOK)
+	if ok {
+		return success, nil
+	}
+	// unexpected success response
+	// safeguard: normally, absent a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for GetConntrackExport: API contract not enforced by server. Client expected to get an error, but got: %T", result)
 	panic(msg)
 }
 
