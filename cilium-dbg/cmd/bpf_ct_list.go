@@ -37,9 +37,14 @@ var (
 
 			common.RequireRootPrivilege("cilium bpf ct list")
 
-			err = importCtMapsDump()
+			// err = importCtMapsDump()
+			// if err != nil {
+			// 	cmd.PrintErrf("importCtMapsDump failed: %s", err.Error())
+			// 	return
+			// }
+			err = ctmap.FillCtMaps()
 			if err != nil {
-				cmd.PrintErrf("importCtMapsDump failed: %s", err.Error())
+				cmd.PrintErrf("FillCtMaps failed: %s", err.Error())
 				return
 			}
 			dumpCt(getMaps(t, id), t)

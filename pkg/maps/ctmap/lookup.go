@@ -9,6 +9,7 @@ import (
 	"net/netip"
 
 	lbmap "github.com/cilium/cilium/pkg/maps/lbmap"
+	"github.com/cilium/cilium/pkg/maps/timestamp"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	lb "github.com/cilium/cilium/pkg/loadbalancer"
@@ -348,6 +349,63 @@ func Insert(key *CtKey4Global, entry *CtEntry) error {
 	}
 
 	return m.Update(key, entry)
+}
+
+func mustIPv4(a, b, c, d byte) types.IPv4 {
+	return types.IPv4{a, b, c, d}
+}
+
+func FillCtMaps() error {
+	m, err := getOrOpenMap("global", true, u8proto.TCP)
+	if err != nil || m == nil {
+		return err
+	}
+
+	// Get current CT time to set GC-safe Lifetime
+	ctTime, _ := timestamp.GetCTCurTime(timestamp.GetClockSourceFromOptions())
+
+	for i := 0; i < 100000; i++ {
+		ipByte := byte(3)
+		if i >= 100000 {
+			ipByte = 4
+		}
+		srcPort := uint16(10000 + i%50000)
+		dstPort := uint16(80 + i/50000) // increment DestPort every 50k entries
+		key := &CtKey4Global{
+			TupleKey4Global: tuple.TupleKey4Global{
+				TupleKey4: tuple.TupleKey4{
+					DestAddr:   mustIPv4(10, 0, 0, 2),
+					SourceAddr: mustIPv4(10, 0, 0, ipByte),
+					DestPort:   dstPort,
+					SourcePort: srcPort,
+					NextHeader: u8proto.TCP,
+					Flags:      TUPLE_F_IN,
+				},
+			},
+		}
+
+		entry := &CtEntry{
+			Reserved0:        0,
+			BackendID:        0,
+			Packets:          1,
+			Bytes:            64,
+			Lifetime:         uint32(ctTime) + 3600,
+			Flags:            0,
+			RevNAT:           0,
+			IfIndex:          0,
+			TxFlagsSeen:      0,
+			RxFlagsSeen:      0,
+			SourceSecurityID: 0,
+			LastTxReport:     0,
+			LastRxReport:     0,
+		}
+
+		if err := m.Update(key, entry); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func getMapWithName(epname string, ipv4 bool, proto u8proto.U8proto) *bpf.Map {
