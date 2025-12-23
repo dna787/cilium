@@ -364,7 +364,7 @@ func FillCtMaps() error {
 	// Get current CT time to set GC-safe Lifetime
 	ctTime, _ := timestamp.GetCTCurTime(timestamp.GetClockSourceFromOptions())
 
-	for i := 0; i < 100000; i++ {
+	for i := 0; i < 300000; i++ {
 		ipByte := byte(3)
 		if i >= 100000 {
 			ipByte = 4

@@ -6,12 +6,14 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"sort"
 	"strings"
+	"unsafe"
 
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
@@ -581,6 +583,88 @@ func parseIPv4ToBinary(s string) (types.IPv4, error) {
 	return out, nil
 }
 
+func writeRaw[T any](w http.ResponseWriter, v *T) error {
+	size := unsafe.Sizeof(*v)
+	b := unsafe.Slice((*byte)(unsafe.Pointer(v)), size)
+	_, err := w.Write(b)
+	return err
+}
+
+func writeBinaryConntrack(
+	w http.ResponseWriter,
+	key *ctmap.CtKey4Global,
+	entry *ctmap.CtEntry,
+) error {
+	var order = binary.LittleEndian
+
+	if _, err := w.Write(key.DestAddr[:]); err != nil {
+		return err
+	}
+
+	if _, err := w.Write(key.SourceAddr[:]); err != nil {
+		return err
+	}
+
+	if err := writeRaw(w, &key.DestPort); err != nil {
+		return err
+	}
+
+	if err := writeRaw(w, &key.SourcePort); err != nil {
+		return err
+	}
+
+	if err := writeRaw(w, &key.NextHeader); err != nil {
+		return err
+	}
+
+	if err := writeRaw(w, &key.Flags); err != nil {
+		return err
+	}
+
+	if err := binary.Write(w, order, entry.Reserved0); err != nil {
+		return err
+	}
+	if err := binary.Write(w, order, entry.BackendID); err != nil {
+		return err
+	}
+	if err := binary.Write(w, order, entry.Packets); err != nil {
+		return err
+	}
+	if err := binary.Write(w, order, entry.Bytes); err != nil {
+		return err
+	}
+	// TODO convert from abs node specific to relative node-aware value
+	if err := binary.Write(w, order, entry.Lifetime); err != nil {
+		return err
+	}
+	if err := binary.Write(w, order, entry.Flags); err != nil {
+		return err
+	}
+
+	if err := writeRaw(w, &entry.RevNAT); err != nil {
+		return err
+	}
+
+	// ignore field entry.IfIndex - it is node specific
+	if err := binary.Write(w, order, entry.TxFlagsSeen); err != nil {
+		return err
+	}
+	if err := binary.Write(w, order, entry.RxFlagsSeen); err != nil {
+		return err
+	}
+	if err := binary.Write(w, order, entry.SourceSecurityID); err != nil {
+		return err
+	}
+	if err := binary.Write(w, order, entry.LastTxReport); err != nil {
+		return err
+	}
+	if err := binary.Write(w, order, entry.LastRxReport); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func getConntrackExportHandler(
 	d *Daemon,
 	params GetConntrackExportParams,
@@ -596,8 +680,9 @@ func getConntrackExportHandler(
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		w.Header().Set("Transfer-Encoding", "chunked")
+		// w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		// w.Header().Set("Transfer-Encoding", "chunked")
 		w.WriteHeader(http.StatusOK)
 
 		enc := json.NewEncoder(w)
@@ -649,16 +734,31 @@ func getConntrackExportHandler(
 					return false
 				}
 
-				record := ctmap.CtMapRecord{Key: key4, Value: *value.(*ctmap.CtEntry)}
-				if err := enc.Encode(record); err != nil {
+				entity, ok := value.(*ctmap.CtEntry)
+				if !ok {
+					// TODO logs
+					return false
+				}
+				if err := writeBinaryConntrack(w, key4, entity); err != nil {
 					log.WithFields(logrus.Fields{
 						"map":   m,
 						"path":  path,
 						"error": err,
-					}).Debug("Failed to encode json and write to socket")
+					}).Debug("Failed to serialize binary data and write to socket")
 					isConnClosed = true
 					return true
 				}
+
+				// record := ctmap.CtMapRecord{Key: key4, Value: *value.(*ctmap.CtEntry)}
+				// if err := enc.Encode(record); err != nil {
+				// 	log.WithFields(logrus.Fields{
+				// 		"map":   m,
+				// 		"path":  path,
+				// 		"error": err,
+				// 	}).Debug("Failed to encode json and write to socket")
+				// 	isConnClosed = true
+				// 	return true
+				// }
 				return false
 			}
 
