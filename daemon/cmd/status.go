@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -26,7 +27,6 @@ import (
 	. "github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/backoff"
-	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
@@ -46,13 +46,13 @@ import (
 	"github.com/cilium/cilium/pkg/maps/ratelimitmap"
 	"github.com/cilium/cilium/pkg/maps/timestamp"
 	tunnelmap "github.com/cilium/cilium/pkg/maps/tunnel"
-	"github.com/cilium/cilium/pkg/metrics"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/status"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/version"
+	"github.com/cilium/ebpf"
 )
 
 const (
@@ -677,6 +677,67 @@ func writeBinaryConntrack(
 	return err
 }
 
+func processCtMap(
+	m *ctmap.Map,
+	w http.ResponseWriter,
+	ctx context.Context,
+	ip4 types.IPv4,
+	isConnClosed *bool,
+) error {
+	_, err := ctmap.OpenCTMap(m)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	const chunkSize uint32 = 4096
+	kout := make([]ctmap.CtKey4Global, chunkSize)
+	vout := make([]ctmap.CtEntry, chunkSize)
+
+	totalCount := 0
+	var cursor ebpf.MapBatchCursor
+	for {
+		// Check cancellation early
+		select {
+		case <-ctx.Done():
+			*isConnClosed = true
+			return nil
+		default:
+		}
+
+		count, batchErr := m.BatchLookup(&cursor, kout, vout, nil)
+		totalCount += count
+		for i := range count {
+			k := &kout[i]
+			v := &vout[i]
+
+			flags := k.GetFlags()
+			src, dst := k.SourceAddr, k.DestAddr
+			isIngress := flags&ctmap.TUPLE_F_IN != 0 || flags&ctmap.TUPLE_F_SERVICE != 0
+			isEgress := flags == ctmap.TUPLE_F_OUT
+			if !(isIngress && ip4 == src || isEgress && ip4 == dst) {
+				continue
+			}
+
+			if err := writeBinaryConntrack(w, k, v); err != nil {
+				log.WithFields(logrus.Fields{
+					"map":   m,
+					"error": err,
+				}).Debug("Failed to serialize binary data and write to socket")
+				*isConnClosed = true
+				return nil
+			}
+		}
+		if batchErr != nil {
+			if errors.Is(batchErr, ebpf.ErrKeyNotExist) {
+				fmt.Printf("DEBUG BatchLookup count = %d\n", totalCount)
+				return nil // end of map, we're done iterating
+			}
+			return batchErr
+		}
+	}
+}
+
 func getConntrackExportHandler(
 	d *Daemon,
 	params GetConntrackExportParams,
@@ -692,7 +753,6 @@ func getConntrackExportHandler(
 			return
 		}
 
-		// w.Header().Set("Content-Type", "application/x-ndjson")
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Transfer-Encoding", "chunked")
 		w.WriteHeader(http.StatusOK)
@@ -700,94 +760,31 @@ func getConntrackExportHandler(
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
 
-		if rw, ok := w.(*metrics.ResponderWrapper); ok {
-			w = rw.ResponseWriter
-		}
-		flusher, isFlusherExists := w.(http.Flusher)
+		// if rw, ok := w.(*metrics.ResponderWrapper); ok {
+		// 	w = rw.ResponseWriter
+		// }
+		// flusher, isFlusherExists := w.(http.Flusher)
 
 		isConnClosed := false
 		maps := getCtMaps()
 		for _, m := range maps {
-			path, err := ctmap.OpenCTMap(m)
-			if err != nil {
+			start := time.Now()
+			if err = processCtMap(m, w, ctx, ip4, &isConnClosed); err != nil {
 				log.WithFields(logrus.Fields{
 					"map":   m,
-					"path":  path,
 					"error": err,
-				}).Debug("Failed to open conntrack map")
-				continue
-			}
-			defer m.Close()
-
-			ds := bpf.NewDumpStats(&m.Map)
-			callback := func(key bpf.MapKey, value bpf.MapValue) bool {
-				select {
-				case <-ctx.Done():
-					isConnClosed = true
-					return true
-				default:
-				}
-
-				// periodically force sending small amounts of buffering data
-				if isFlusherExists && ds.Lookup%5000 == 0 {
-					flusher.Flush()
-				}
-
-				key4, ok := key.(*ctmap.CtKey4Global)
-				if !ok {
-					return false
-				}
-
-				flags := key4.GetFlags()
-				src, dst := key4.SourceAddr, key4.DestAddr
-				isIngress := flags&ctmap.TUPLE_F_IN != 0 || flags&ctmap.TUPLE_F_SERVICE != 0
-				isEgress := flags == ctmap.TUPLE_F_OUT
-				if !(isIngress && ip4 == src || isEgress && ip4 == dst) {
-					return false
-				}
-
-				entity, ok := value.(*ctmap.CtEntry)
-				if !ok {
-					// TODO logs
-					return false
-				}
-				if err := writeBinaryConntrack(w, key4, entity); err != nil {
-					log.WithFields(logrus.Fields{
-						"map":   m,
-						"path":  path,
-						"error": err,
-					}).Debug("Failed to serialize binary data and write to socket")
-					isConnClosed = true
-					return true
-				}
-
-				// record := ctmap.CtMapRecord{Key: key4, Value: *value.(*ctmap.CtEntry)}
-				// if err := enc.Encode(record); err != nil {
-				// 	log.WithFields(logrus.Fields{
-				// 		"map":   m,
-				// 		"path":  path,
-				// 		"error": err,
-				// 	}).Debug("Failed to encode json and write to socket")
-				// 	isConnClosed = true
-				// 	return true
-				// }
-				return false
+				}).Error("Failed to open conntrack map")
 			}
 
-			if err = m.DumpReliablyWithCallbackErr(callback, ds); err != nil {
-				log.WithFields(logrus.Fields{
-					"map":   m,
-					"path":  path,
-					"error": err,
-				}).Debug("DumpReliablyWithCallbackErr have error")
-			}
-
-			log.Info(ds)
-
+			fmt.Printf("DEBUG duration = %d ms\n", time.Since(start).Milliseconds())
 			if isConnClosed {
 				log.Debug("HTTP client closed connection")
 				break
 			}
+			// 	// periodically force sending small amounts of buffering data
+			// 	if isFlusherExists && ds.Lookup%5000 == 0 {
+			// 		flusher.Flush()
+			// 	}
 		}
 	})
 }
