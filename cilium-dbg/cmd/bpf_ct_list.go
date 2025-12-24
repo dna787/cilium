@@ -42,10 +42,12 @@ var (
 			// 	cmd.PrintErrf("importCtMapsDump failed: %s", err.Error())
 			// 	return
 			// }
-			err = ctmap.FillCtMaps()
-			if err != nil {
-				cmd.PrintErrf("FillCtMaps failed: %s", err.Error())
-				return
+			if t == "endpoint" {
+				err = ctmap.FillCtMaps()
+				if err != nil {
+					cmd.PrintErrf("FillCtMaps failed: %s", err.Error())
+					return
+				}
 			}
 			dumpCt(getMaps(t, id), t)
 		},
