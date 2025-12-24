@@ -77,9 +77,9 @@ func WithContentTypeApplicationJSON(r *runtime.ClientOperation) {
 	r.ConsumesMediaTypes = []string{"application/json"}
 }
 
-// WithContentTypeApplicationxNdjson sets the Content-Type header to "application/x-ndjson".
-func WithContentTypeApplicationxNdjson(r *runtime.ClientOperation) {
-	r.ConsumesMediaTypes = []string{"application/x-ndjson"}
+// WithContentTypeApplicationOctetStream sets the Content-Type header to "application/octet-stream".
+func WithContentTypeApplicationOctetStream(r *runtime.ClientOperation) {
+	r.ConsumesMediaTypes = []string{"application/octet-stream"}
 }
 
 // WithAccept allows the client to force the Accept header
@@ -618,7 +618,7 @@ func (a *Client) PostConntrackImport(params *PostConntrackImportParams, opts ...
 		Method:             "POST",
 		PathPattern:        "/conntrack/import",
 		ProducesMediaTypes: []string{"application/json"},
-		ConsumesMediaTypes: []string{"application/x-ndjson"},
+		ConsumesMediaTypes: []string{"application/octet-stream"},
 		Schemes:            []string{"http"},
 		Params:             params,
 		Reader:             &PostConntrackImportReader{formats: a.formats},

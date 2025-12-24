@@ -287,7 +287,7 @@ func init() {
     "/conntrack/import": {
       "post": {
         "consumes": [
-          "application/x-ndjson"
+          "application/octet-stream"
         ],
         "tags": [
           "daemon"
@@ -5871,7 +5871,7 @@ func init() {
     "/conntrack/import": {
       "post": {
         "consumes": [
-          "application/x-ndjson"
+          "application/octet-stream"
         ],
         "tags": [
           "daemon"

@@ -50,6 +50,7 @@ func NewCiliumAPIAPI(spec *loads.Document) *CiliumAPIAPI {
 		APIKeyAuthenticator: security.APIKeyAuth,
 		BearerAuthenticator: security.BearerAuth,
 
+		BinConsumer:  runtime.ByteStreamConsumer(),
 		JSONConsumer: runtime.JSONConsumer(),
 
 		JSONProducer: runtime.JSONProducer(),
@@ -250,9 +251,11 @@ type CiliumAPIAPI struct {
 	// It has a default implementation in the security package, however you can replace it for your particular usage.
 	BearerAuthenticator func(string, security.ScopedTokenAuthentication) runtime.Authenticator
 
+	// BinConsumer registers a consumer for the following mime types:
+	//   - application/octet-stream
+	BinConsumer runtime.Consumer
 	// JSONConsumer registers a consumer for the following mime types:
 	//   - application/json
-	//   - application/x-ndjson
 	JSONConsumer runtime.Consumer
 
 	// JSONProducer registers a producer for the following mime types:
@@ -441,6 +444,9 @@ func (o *CiliumAPIAPI) RegisterFormat(name string, format strfmt.Format, validat
 func (o *CiliumAPIAPI) Validate() error {
 	var unregistered []string
 
+	if o.BinConsumer == nil {
+		unregistered = append(unregistered, "BinConsumer")
+	}
 	if o.JSONConsumer == nil {
 		unregistered = append(unregistered, "JSONConsumer")
 	}
@@ -646,10 +652,10 @@ func (o *CiliumAPIAPI) ConsumersFor(mediaTypes []string) map[string]runtime.Cons
 	result := make(map[string]runtime.Consumer, len(mediaTypes))
 	for _, mt := range mediaTypes {
 		switch mt {
+		case "application/octet-stream":
+			result["application/octet-stream"] = o.BinConsumer
 		case "application/json":
 			result["application/json"] = o.JSONConsumer
-		case "application/x-ndjson":
-			result["application/x-ndjson"] = o.JSONConsumer
 		}
 
 		if c, ok := o.customConsumers[mt]; ok {

@@ -12,8 +12,8 @@
 //	Version: v1beta1
 //
 //	Consumes:
+//	  - application/octet-stream
 //	  - application/json
-//	  - application/x-ndjson
 //
 //	Produces:
 //	  - application/json
