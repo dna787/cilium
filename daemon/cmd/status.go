@@ -4,13 +4,13 @@
 package cmd
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
@@ -51,6 +51,7 @@ import (
 	"github.com/cilium/cilium/pkg/status"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/types"
+	"github.com/cilium/cilium/pkg/u8proto"
 	"github.com/cilium/cilium/pkg/version"
 	"github.com/cilium/ebpf"
 )
@@ -503,62 +504,124 @@ func getIncHandler(d *Daemon, params GetIncParams) middleware.Responder {
 	return NewGetIncOK().WithPayload(&sr)
 }
 
-type Example struct {
-	ID    int    `json:"id"`
-	Value string `json:"value"`
+func deserializeConntrackFromReader(
+	r io.Reader,
+) (*ctmap.CtKey4Global, *ctmap.CtEntry, error) {
+
+	order := binary.LittleEndian
+
+	key := &ctmap.CtKey4Global{}
+	entry := &ctmap.CtEntry{}
+
+	if _, err := io.ReadFull(r, key.DestAddr[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, key.SourceAddr[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, (*[2]byte)(unsafe.Pointer(&key.DestPort))[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, (*[2]byte)(unsafe.Pointer(&key.SourcePort))[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, (*[1]byte)(unsafe.Pointer(&key.NextHeader))[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, (*[1]byte)(unsafe.Pointer(&key.Flags))[:]); err != nil {
+		return nil, nil, err
+	}
+
+	// --- Entry ---
+
+	if err := binary.Read(r, order, &entry.Reserved0); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.BackendID); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.Packets); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.Bytes); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.Lifetime); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.Flags); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.RevNAT); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.TxFlagsSeen); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.RxFlagsSeen); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.SourceSecurityID); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.LastTxReport); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.LastRxReport); err != nil {
+		return nil, nil, err
+	}
+
+	return key, entry, nil
 }
 
 func postConntrackImportHandler(
 	d *Daemon,
 	params PostConntrackImportParams,
 ) middleware.Responder {
-	return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
-		r := params.HTTPRequest
-		defer r.Body.Close()
+	r := params.HTTPRequest
+	defer r.Body.Close()
 
-		fmt.Printf("DEBUG postConntrackImportHandler\n")
-		scanner := bufio.NewScanner(r.Body)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			fmt.Printf("DEBUG - new lines %s\n", line)
+	fmt.Printf("DEBUG postConntrackImportHandler\n")
+
+	var tcpMap *ctmap.Map
+	var anyMap *ctmap.Map
+	maps := getCtMaps()
+	for i, m := range maps {
+		_, err := ctmap.OpenCTMap(m)
+		if err != nil {
+			// TODO debug log
+			continue
 		}
+		defer m.Close()
 
-		if err := scanner.Err(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if i == 0 {
+			tcpMap = m
+		} else {
+			anyMap = m
 		}
+	}
 
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		w.Header().Set("Transfer-Encoding", "chunked")
-		w.WriteHeader(http.StatusOK)
-
-		// if rw, ok := w.(*metrics.ResponderWrapper); ok {
-		// 	w = rw.ResponseWriter
-		// }
-		// flusher, ok := w.(http.Flusher)
-
-		// Stream 10 JSON objects, one per line
-		for i := 1; i <= 10; i++ {
-			data := Example{
-				ID:    i,
-				Value: fmt.Sprintf("value-%d", i),
+	for {
+		k, v, err := deserializeConntrackFromReader(r.Body)
+		if err != nil {
+			if err == io.ErrUnexpectedEOF || err == io.EOF {
 			}
-
-			line, err := json.Marshal(data)
-			if err != nil {
-				http.Error(w, "JSON encoding error", http.StatusInternalServerError)
-				return
-			}
-
-			// Write the line + newline
-			w.Write(line)
-			w.Write([]byte("\n"))
-
-			// if ok {
-			// 	flusher.Flush()
-			// }
+			break
 		}
-	})
+
+		ctMap := tcpMap
+		if k.NextHeader != u8proto.TCP {
+			ctMap = anyMap
+		}
+
+		if err := ctMap.Update(k, v); err != nil {
+			// TODO log
+			fmt.Printf("DEBUG ctMap Update Failed = %v\n", err)
+			continue
+		}
+	}
+
+	return NewPostConntrackImportOK()
 }
 
 func getCtMaps() []*ctmap.Map {
@@ -690,6 +753,11 @@ func processCtMap(
 	}
 	defer m.Close()
 
+	// if rw, ok := w.(*metrics.ResponderWrapper); ok {
+	// 	w = rw.ResponseWriter
+	// }
+	// flusher, isFlusherExists := w.(http.Flusher)
+
 	const chunkSize uint32 = 4096
 	kout := make([]ctmap.CtKey4Global, chunkSize)
 	vout := make([]ctmap.CtEntry, chunkSize)
@@ -728,6 +796,10 @@ func processCtMap(
 				return nil
 			}
 		}
+		// 	// periodically force sending small amounts of buffering data
+		// 	if isFlusherExists {
+		// 		flusher.Flush()
+		// 	}
 		if batchErr != nil {
 			if errors.Is(batchErr, ebpf.ErrKeyNotExist) {
 				fmt.Printf("DEBUG BatchLookup count = %d\n", totalCount)
@@ -760,11 +832,6 @@ func getConntrackExportHandler(
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
 
-		// if rw, ok := w.(*metrics.ResponderWrapper); ok {
-		// 	w = rw.ResponseWriter
-		// }
-		// flusher, isFlusherExists := w.(http.Flusher)
-
 		isConnClosed := false
 		maps := getCtMaps()
 		for _, m := range maps {
@@ -781,10 +848,6 @@ func getConntrackExportHandler(
 				log.Debug("HTTP client closed connection")
 				break
 			}
-			// 	// periodically force sending small amounts of buffering data
-			// 	if isFlusherExists && ds.Lookup%5000 == 0 {
-			// 		flusher.Flush()
-			// 	}
 		}
 	})
 }
