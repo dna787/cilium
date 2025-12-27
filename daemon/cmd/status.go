@@ -532,8 +532,6 @@ func deserializeConntrackFromReader(
 		return nil, nil, err
 	}
 
-	// --- Entry ---
-
 	if err := binary.Read(r, order, &entry.Reserved0); err != nil {
 		return nil, nil, err
 	}
@@ -574,6 +572,76 @@ func deserializeConntrackFromReader(
 	return key, entry, nil
 }
 
+type batchContext struct {
+	m        *ctmap.Map
+	keys     []ctmap.CtKey4Global
+	values   []ctmap.CtEntry
+	next     uint32
+	capacity uint32
+}
+
+func NewBatchContext(m *ctmap.Map, chunkSize uint32) (*batchContext, error) {
+	_, err := ctmap.OpenCTMap(m)
+	if err != nil {
+		return nil, err
+	}
+
+	return &batchContext{
+		m:        m,
+		keys:     make([]ctmap.CtKey4Global, chunkSize),
+		values:   make([]ctmap.CtEntry, chunkSize),
+		next:     0,
+		capacity: chunkSize,
+	}, nil
+}
+
+func (ctx *batchContext) Close() {
+	if ctx.m != nil {
+		ctx.m.Close()
+	}
+}
+
+func (ctx *batchContext) Append(k *ctmap.CtKey4Global, v *ctmap.CtEntry) {
+
+	curr := ctx.next
+	if curr < ctx.capacity {
+		ctx.keys[curr] = *k
+		ctx.values[curr] = *v
+		ctx.next++
+	}
+
+	isForced := false
+	ctx.Flush(isForced)
+}
+
+func (ctx *batchContext) Flush(isForced bool) {
+	currentCount := ctx.next
+	if currentCount == 0 {
+		return
+	}
+
+	isFull := currentCount == ctx.capacity
+	if !isForced && !isFull {
+		return
+	}
+
+	// only pass the filled part of the arrays
+	keys := ctx.keys[:currentCount]
+	values := ctx.values[:currentCount]
+
+	// TODO handle correctly partial update !!!
+	count, err := ctx.m.BatchUpdate(keys, values, nil)
+	if err != nil {
+		fmt.Printf("DEBUG BatchUpdate Failed = %v\n", err)
+	}
+
+	if uint32(count) != currentCount {
+		fmt.Printf("DEBUG BatchUpdate Partial Update: %d %d\n", count, currentCount)
+	}
+
+	ctx.next = 0
+}
+
 func postConntrackImportHandler(
 	d *Daemon,
 	params PostConntrackImportParams,
@@ -583,42 +651,54 @@ func postConntrackImportHandler(
 
 	fmt.Printf("DEBUG postConntrackImportHandler\n")
 
-	var tcpMap *ctmap.Map
-	var anyMap *ctmap.Map
-	maps := getCtMaps()
-	for i, m := range maps {
-		_, err := ctmap.OpenCTMap(m)
-		if err != nil {
-			// TODO debug log
-			continue
-		}
-		defer m.Close()
-
-		if i == 0 {
-			tcpMap = m
-		} else {
-			anyMap = m
-		}
+	const chunkSize uint32 = 4096
+	tcp, err := NewBatchContext(ctmap.GetTCPCtMap(), chunkSize)
+	if err != nil {
+		fmt.Printf("DEBUG NewBatchContext TCP Failed = %v\n", err)
+	} else {
+		defer tcp.Close()
 	}
 
+	udp, err := NewBatchContext(ctmap.GetAnyCtMap(), chunkSize)
+	if err != nil {
+		fmt.Printf("DEBUG NewBatchContext Any Failed = %v\n", err)
+	} else {
+		defer udp.Close()
+	}
+
+	if tcp == nil && udp == nil {
+		// TODO correctly handle error
+		fmt.Printf("DEBUG failed open any ct map - close session\n")
+		return NewPostConntrackImportOK()
+	}
+
+	isConnClosed := false
 	for {
-		k, v, err := deserializeConntrackFromReader(r.Body)
-		if err != nil {
-			if err == io.ErrUnexpectedEOF || err == io.EOF {
+		if isConnClosed {
+			if tcp != nil {
+				tcp.Flush(true)
+			}
+			if udp != nil {
+				udp.Flush(true)
 			}
 			break
 		}
 
-		ctMap := tcpMap
-		if k.NextHeader != u8proto.TCP {
-			ctMap = anyMap
+		k, v, err := deserializeConntrackFromReader(r.Body)
+		if err != nil {
+			isConnClosed = true
+			if err == io.ErrUnexpectedEOF || err == io.EOF {
+			}
+			continue // try flush remaining enities and exit in next iteration
 		}
 
-		if err := ctMap.Update(k, v); err != nil {
-			// TODO log
-			fmt.Printf("DEBUG ctMap Update Failed = %v\n", err)
-			continue
+		// TODO skip correctly
+		ctx := tcp
+		if k.NextHeader != u8proto.TCP && udp != nil {
+			ctx = udp
 		}
+
+		ctx.Append(k, v)
 	}
 
 	return NewPostConntrackImportOK()

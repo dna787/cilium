@@ -1020,6 +1020,10 @@ func (m *Map) BatchLookup(cursor *ebpf.MapBatchCursor, keysOut, valuesOut interf
 	return m.m.BatchLookup(cursor, keysOut, valuesOut, opts)
 }
 
+func (m *Map) BatchUpdate(keysOut, valuesOut interface{}, opts *ebpf.BatchOptions) (int, error) {
+	return m.m.BatchUpdate(keysOut, valuesOut, opts)
+}
+
 // DumpIfExists dumps the contents of the map into hash via Dump() if the map
 // file exists
 func (m *Map) DumpIfExists(hash map[string][]string) error {

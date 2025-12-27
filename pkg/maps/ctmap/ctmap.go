@@ -815,6 +815,14 @@ func DeleteIfUpgradeNeeded(e CtEndpoint) {
 	}
 }
 
+func GetTCPCtMap() *Map {
+	return newMap(MapNameTCP4Global, mapTypeIPv4TCPGlobal)
+}
+
+func GetAnyCtMap() *Map {
+	return newMap(MapNameAny4Global, mapTypeIPv4AnyGlobal)
+}
+
 // maps returns all connecting tracking maps associated with endpoint 'e' (or
 // the global maps if 'e' is nil).
 func maps(e CtEndpoint, ipv4, ipv6 bool) []*Map {
