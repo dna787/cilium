@@ -602,7 +602,6 @@ func (ctx *batchContext) Close() {
 }
 
 func (ctx *batchContext) Append(k *ctmap.CtKey4Global, v *ctmap.CtEntry) {
-
 	curr := ctx.next
 	if curr < ctx.capacity {
 		ctx.keys[curr] = *k
@@ -629,6 +628,7 @@ func (ctx *batchContext) Flush(isForced bool) {
 	keys := ctx.keys[:currentCount]
 	values := ctx.values[:currentCount]
 
+	// TODO handle errors where working with map have non-sense !!!
 	// TODO handle correctly partial update !!!
 	count, err := ctx.m.BatchUpdate(keys, values, nil)
 	if err != nil {
@@ -640,6 +640,32 @@ func (ctx *batchContext) Flush(isForced bool) {
 	}
 
 	ctx.next = 0
+}
+
+func flushContexts(ctxs []*batchContext) {
+	for _, ctx := range ctxs {
+		if ctx != nil {
+			ctx.Flush(true)
+		}
+	}
+}
+
+func appendToContext(
+	tcp *batchContext,
+	udp *batchContext,
+	k *ctmap.CtKey4Global,
+	v *ctmap.CtEntry) {
+	var ctx *batchContext
+	if k.NextHeader == u8proto.TCP && tcp != nil {
+		ctx = tcp
+	} else if k.NextHeader != u8proto.TCP && udp != nil {
+		ctx = udp
+	} else {
+		// context for this conntrack is not available, silently skip
+		return
+	}
+
+	ctx.Append(k, v)
 }
 
 func postConntrackImportHandler(
@@ -672,35 +698,14 @@ func postConntrackImportHandler(
 		return NewPostConntrackImportOK()
 	}
 
-	isConnClosed := false
 	for {
-		if isConnClosed {
-			if tcp != nil {
-				tcp.Flush(true)
-			}
-			if udp != nil {
-				udp.Flush(true)
-			}
-			break
-		}
-
 		k, v, err := deserializeConntrackFromReader(r.Body)
 		if err != nil {
-			isConnClosed = true
-			if err == io.ErrUnexpectedEOF || err == io.EOF {
-			}
-			continue // try flush remaining enities and exit in next iteration
+			flushContexts([]*batchContext{tcp, udp})
+			break
 		}
-
-		// TODO skip correctly
-		ctx := tcp
-		if k.NextHeader != u8proto.TCP && udp != nil {
-			ctx = udp
-		}
-
-		ctx.Append(k, v)
+		appendToContext(tcp, udp, k, v)
 	}
-
 	return NewPostConntrackImportOK()
 }
 
