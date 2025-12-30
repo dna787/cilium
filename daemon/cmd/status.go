@@ -550,7 +550,8 @@ func deserializeConntrackFromReader(
 	if err := binary.Read(r, order, &entry.Flags); err != nil {
 		return nil, nil, err
 	}
-	if err := binary.Read(r, order, &entry.RevNAT); err != nil {
+	// revnat value is already in network byte order
+	if _, err := io.ReadFull(r, (*[2]byte)(unsafe.Pointer(&entry.RevNAT))[:]); err != nil {
 		return nil, nil, err
 	}
 	if err := binary.Read(r, order, &entry.TxFlagsSeen); err != nil {
@@ -646,6 +647,7 @@ func flushContexts(ctxs []*batchContext) {
 	for _, ctx := range ctxs {
 		if ctx != nil {
 			ctx.Flush(true)
+			ctx.Close()
 		}
 	}
 }
@@ -668,6 +670,26 @@ func appendToContext(
 	ctx.Append(k, v)
 }
 
+func createContexts() (tcp *batchContext, udp *batchContext, err error) {
+	const chunkSize uint32 = 4096
+	tcp, errTCP := NewBatchContext(ctmap.GetTCPCtMap(), chunkSize)
+	if errTCP != nil {
+		// TODO debug logs
+		fmt.Printf("DEBUG NewBatchContext TCP Failed = %v\n", errTCP)
+	}
+
+	udp, errUDP := NewBatchContext(ctmap.GetAnyCtMap(), chunkSize)
+	if errUDP != nil {
+		// TODO debug logs
+		fmt.Printf("DEBUG NewBatchContext Any Failed = %v\n", errUDP)
+	}
+
+	if tcp == nil && udp == nil {
+		err = fmt.Errorf("failed open any ct map, tcp: %v, any: %v", errTCP, errUDP)
+	}
+	return
+}
+
 func postConntrackImportHandler(
 	d *Daemon,
 	params PostConntrackImportParams,
@@ -677,35 +699,23 @@ func postConntrackImportHandler(
 
 	fmt.Printf("DEBUG postConntrackImportHandler\n")
 
-	const chunkSize uint32 = 4096
-	tcp, err := NewBatchContext(ctmap.GetTCPCtMap(), chunkSize)
+	tcp, udp, err := createContexts()
 	if err != nil {
-		fmt.Printf("DEBUG NewBatchContext TCP Failed = %v\n", err)
-	} else {
-		defer tcp.Close()
-	}
-
-	udp, err := NewBatchContext(ctmap.GetAnyCtMap(), chunkSize)
-	if err != nil {
-		fmt.Printf("DEBUG NewBatchContext Any Failed = %v\n", err)
-	} else {
-		defer udp.Close()
-	}
-
-	if tcp == nil && udp == nil {
-		// TODO correctly handle error
-		fmt.Printf("DEBUG failed open any ct map - close session\n")
+		// TODO correct http error
 		return NewPostConntrackImportOK()
 	}
 
 	for {
 		k, v, err := deserializeConntrackFromReader(r.Body)
 		if err != nil {
-			flushContexts([]*batchContext{tcp, udp})
 			break
 		}
+
 		appendToContext(tcp, udp, k, v)
 	}
+
+	flushContexts([]*batchContext{tcp, udp})
+
 	return NewPostConntrackImportOK()
 }
 
@@ -787,8 +797,8 @@ func serializeConntrack(
 	if err := binary.Write(buf, order, entry.Flags); err != nil {
 		return nil, err
 	}
-	// TODO don't change order
-	if err := binary.Write(buf, order, entry.RevNAT); err != nil {
+	// revnat value is already in network byte order
+	if err := writeRawToBuf(buf, &entry.RevNAT); err != nil {
 		return nil, err
 	}
 	if err := binary.Write(buf, order, entry.TxFlagsSeen); err != nil {
@@ -848,6 +858,7 @@ func processCtMap(
 	vout := make([]ctmap.CtEntry, chunkSize)
 
 	totalCount := 0
+	defer fmt.Printf("DEBUG EXPORTED COUNT=%d\n", totalCount)
 	var cursor ebpf.MapBatchCursor
 	for {
 		// Check cancellation early
@@ -859,7 +870,6 @@ func processCtMap(
 		}
 
 		count, batchErr := m.BatchLookup(&cursor, kout, vout, nil)
-		totalCount += count
 		for i := range count {
 			k := &kout[i]
 			v := &vout[i]
@@ -880,6 +890,7 @@ func processCtMap(
 				*isConnClosed = true
 				return nil
 			}
+			totalCount++
 		}
 		// 	// periodically force sending small amounts of buffering data
 		// 	if isFlusherExists {
