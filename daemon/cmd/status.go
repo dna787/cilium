@@ -573,12 +573,32 @@ func deserializeConntrackFromReader(
 	return key, entry, nil
 }
 
+type UnresolvedEntry struct {
+	key *ctmap.CtKey4Global
+	val *ctmap.CtEntry
+}
+
+type RevNatContext struct {
+	// foreign node revnat mapping to current node revnat
+	revnatMap map[uint16]uint16
+	// entries waiting for revnat translation
+	entries map[uint16][]UnresolvedEntry
+}
+
+func NewRevNatContext() *RevNatContext {
+	return &RevNatContext{
+		revnatMap: make(map[uint16]uint16, 256),
+		entries:   make(map[uint16][]UnresolvedEntry, 256),
+	}
+}
+
 type batchContext struct {
 	m        *ctmap.Map
 	keys     []ctmap.CtKey4Global
 	values   []ctmap.CtEntry
 	next     uint32
 	capacity uint32
+	revNat   *RevNatContext
 }
 
 func NewBatchContext(m *ctmap.Map, chunkSize uint32) (*batchContext, error) {
@@ -593,6 +613,7 @@ func NewBatchContext(m *ctmap.Map, chunkSize uint32) (*batchContext, error) {
 		values:   make([]ctmap.CtEntry, chunkSize),
 		next:     0,
 		capacity: chunkSize,
+		revNat:   NewRevNatContext(),
 	}, nil
 }
 
@@ -602,7 +623,20 @@ func (ctx *batchContext) Close() {
 	}
 }
 
+func (ctx *RevNatContext) Handle(
+	key *ctmap.CtKey4Global,
+	val *ctmap.CtEntry,
+) error {
+	return nil
+}
+
 func (ctx *batchContext) Append(k *ctmap.CtKey4Global, v *ctmap.CtEntry) {
+	// TODO revnat mapping logic
+	if v.RevNAT != 0 {
+		// TODO states resolved, resolved and need flush, unresolved
+		ctx.revNat.Handle(k, v)
+	}
+
 	curr := ctx.next
 	if curr < ctx.capacity {
 		ctx.keys[curr] = *k
