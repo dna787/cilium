@@ -17,6 +17,7 @@ import (
 	"strings"
 	"unsafe"
 
+	lb "github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/strfmt"
@@ -27,6 +28,7 @@ import (
 	. "github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/backoff"
+	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
@@ -623,20 +625,136 @@ func (ctx *batchContext) Close() {
 	}
 }
 
+type RevNatDecision int
+
+const (
+	RevNatWrite RevNatDecision = iota
+	RevNatFlush
+	RevNatBuffered
+)
+
+func getOrOpenServiceMap() (*bpf.Map, error) {
+	if m := bpf.GetMap(lbmap.Service4MapV2Name); m != nil {
+		return m, nil
+	}
+
+	return bpf.OpenMap(bpf.MapPath(lbmap.Service4MapV2Name), &lbmap.Service4Key{}, &lbmap.Service4Value{})
+}
+
+func lookupService(key *lbmap.Service4Key) (*lbmap.Service4Value, error) {
+	m, err := getOrOpenServiceMap()
+	if err != nil || m == nil {
+		return nil, err
+	}
+
+	v, err := m.Lookup(key)
+	if err != nil || v == nil {
+		return nil, err
+	}
+	return v.(*lbmap.Service4Value), nil
+}
+
+func resolveForeignRevNat(key *ctmap.CtKey4Global) (uint16, error) {
+	svcKey := lbmap.NewService4Key(key.DestAddr.IP(), key.SourcePort, key.NextHeader, lb.ScopeExternal, 0)
+	svcVal, err := lookupService(svcKey)
+	if err == nil {
+		fmt.Printf("DEBUG SERVICE CT REVNAT %d\n", svcVal.RevNat)
+		return svcVal.RevNat, nil
+	}
+
+	fmt.Printf("DEBUG SERVICE LB LOOKUP WAS FAILED, TRY INTERNAL SCOPE\n")
+	svcKey.Scope = lb.ScopeInternal
+	svcVal, err = lookupService(svcKey)
+	if err != nil {
+		return 0, fmt.Errorf("failed to lookup ct service: %w", err)
+	}
+
+	return svcVal.RevNat, nil
+}
+
 func (ctx *RevNatContext) Handle(
 	key *ctmap.CtKey4Global,
 	val *ctmap.CtEntry,
-) error {
-	return nil
+) RevNatDecision {
+	// foreign-node revnat
+	foreign := val.RevNAT
+	if foreign == 0 {
+		return RevNatWrite
+	}
+
+	if local, isExist := ctx.revnatMap[foreign]; isExist {
+		// local-node revnat
+		val.RevNAT = local
+		return RevNatWrite
+	}
+
+	// buffer the entry with unknown local revnat
+	ctx.entries[foreign] = append(
+		ctx.entries[foreign],
+		UnresolvedEntry{
+			key: key,
+			val: val,
+		},
+	)
+
+	if key.Flags&ctmap.TUPLE_F_SERVICE == 0 {
+		return RevNatBuffered
+	}
+
+	// conntrack have service type - try resolve local revnat
+	local, err := resolveForeignRevNat(key)
+	if err != nil {
+		fmt.Printf("DEBUG resolveForeignRevNat failed %v\n", err)
+		return RevNatBuffered
+	}
+
+	ctx.revnatMap[foreign] = local
+	return RevNatFlush
+}
+
+type RevNatFlushCallback func(
+	key *ctmap.CtKey4Global,
+	val *ctmap.CtEntry,
+)
+
+func (ctx *RevNatContext) Flush(
+	foreign uint16,
+	cb RevNatFlushCallback,
+) {
+	entries, ok := ctx.entries[foreign]
+	if !ok {
+		return
+	}
+
+	local, ok := ctx.revnatMap[foreign]
+	if !ok {
+		return
+	}
+
+	for _, e := range entries {
+		e.val.RevNAT = local
+		cb(e.key, e.val)
+	}
+
+	delete(ctx.entries, foreign)
 }
 
 func (ctx *batchContext) Append(k *ctmap.CtKey4Global, v *ctmap.CtEntry) {
-	// TODO revnat mapping logic
-	if v.RevNAT != 0 {
-		// TODO states resolved, resolved and need flush, unresolved
-		ctx.revNat.Handle(k, v)
+	state := ctx.revNat.Handle(k, v)
+	switch state {
+	case RevNatWrite:
+		ctx.Write(k, v)
+	case RevNatFlush:
+		ctx.revNat.Flush(v.RevNAT, func(
+			key *ctmap.CtKey4Global,
+			val *ctmap.CtEntry,
+		) {
+			ctx.Write(key, val)
+		})
 	}
+}
 
+func (ctx *batchContext) Write(k *ctmap.CtKey4Global, v *ctmap.CtEntry) {
 	curr := ctx.next
 	if curr < ctx.capacity {
 		ctx.keys[curr] = *k
@@ -882,17 +1000,11 @@ func processCtMap(
 	}
 	defer m.Close()
 
-	// if rw, ok := w.(*metrics.ResponderWrapper); ok {
-	// 	w = rw.ResponseWriter
-	// }
-	// flusher, isFlusherExists := w.(http.Flusher)
-
 	const chunkSize uint32 = 4096
 	kout := make([]ctmap.CtKey4Global, chunkSize)
 	vout := make([]ctmap.CtEntry, chunkSize)
 
 	totalCount := 0
-	defer fmt.Printf("DEBUG EXPORTED COUNT=%d\n", totalCount)
 	var cursor ebpf.MapBatchCursor
 	for {
 		// Check cancellation early
@@ -926,14 +1038,12 @@ func processCtMap(
 			}
 			totalCount++
 		}
-		// 	// periodically force sending small amounts of buffering data
-		// 	if isFlusherExists {
-		// 		flusher.Flush()
-		// 	}
+
 		if batchErr != nil {
 			if errors.Is(batchErr, ebpf.ErrKeyNotExist) {
+				// end of map, we're done iterating
 				fmt.Printf("DEBUG BatchLookup count = %d\n", totalCount)
-				return nil // end of map, we're done iterating
+				return nil
 			}
 			return batchErr
 		}
