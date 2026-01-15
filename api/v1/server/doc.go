@@ -12,9 +12,11 @@
 //	Version: v1beta1
 //
 //	Consumes:
+//	  - application/octet-stream
 //	  - application/json
 //
 //	Produces:
+//	  - application/octet-stream
 //	  - application/json
 //
 // swagger:meta

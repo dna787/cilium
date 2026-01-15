@@ -4,20 +4,31 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"sort"
 	"strings"
+	"unsafe"
 
+	lb "github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/strfmt"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 	versionapi "k8s.io/apimachinery/pkg/version"
 
 	"github.com/cilium/cilium/api/v1/models"
 	. "github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/backoff"
+	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
@@ -29,6 +40,7 @@ import (
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	ipmasqmap "github.com/cilium/cilium/pkg/maps/ipmasq"
 	"github.com/cilium/cilium/pkg/maps/lbmap"
@@ -40,7 +52,10 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/status"
 	"github.com/cilium/cilium/pkg/time"
+	"github.com/cilium/cilium/pkg/types"
+	"github.com/cilium/cilium/pkg/u8proto"
 	"github.com/cilium/cilium/pkg/version"
+	"github.com/cilium/ebpf"
 )
 
 const (
@@ -482,6 +497,593 @@ func getHealthzHandler(d *Daemon, params GetHealthzParams) middleware.Responder 
 	requireK8sConnectivity := params.RequireK8sConnectivity != nil && *params.RequireK8sConnectivity
 	sr := d.getStatus(brief, requireK8sConnectivity)
 	return NewGetHealthzOK().WithPayload(&sr)
+}
+
+func deserializeConntrackFromReader(
+	r io.Reader,
+) (*ctmap.CtKey4Global, *ctmap.CtEntry, error) {
+
+	order := binary.LittleEndian
+
+	key := &ctmap.CtKey4Global{}
+	entry := &ctmap.CtEntry{}
+
+	if _, err := io.ReadFull(r, key.DestAddr[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, key.SourceAddr[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, (*[2]byte)(unsafe.Pointer(&key.DestPort))[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, (*[2]byte)(unsafe.Pointer(&key.SourcePort))[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, (*[1]byte)(unsafe.Pointer(&key.NextHeader))[:]); err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.ReadFull(r, (*[1]byte)(unsafe.Pointer(&key.Flags))[:]); err != nil {
+		return nil, nil, err
+	}
+
+	if err := binary.Read(r, order, &entry.Reserved0); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.BackendID); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.Packets); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.Bytes); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.Lifetime); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.Flags); err != nil {
+		return nil, nil, err
+	}
+	// revnat value is already in network byte order
+	if _, err := io.ReadFull(r, (*[2]byte)(unsafe.Pointer(&entry.RevNAT))[:]); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.TxFlagsSeen); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.RxFlagsSeen); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.SourceSecurityID); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.LastTxReport); err != nil {
+		return nil, nil, err
+	}
+	if err := binary.Read(r, order, &entry.LastRxReport); err != nil {
+		return nil, nil, err
+	}
+
+	return key, entry, nil
+}
+
+type UnresolvedEntry struct {
+	key *ctmap.CtKey4Global
+	val *ctmap.CtEntry
+}
+
+type RevNatContext struct {
+	// foreign node revnat mapping to current node revnat
+	revnatMap map[uint16]uint16
+	// entries waiting for revnat translation
+	entries map[uint16][]UnresolvedEntry
+}
+
+func NewRevNatContext() *RevNatContext {
+	return &RevNatContext{
+		revnatMap: make(map[uint16]uint16, 256),
+		entries:   make(map[uint16][]UnresolvedEntry, 256),
+	}
+}
+
+type batchContext struct {
+	m        *ctmap.Map
+	keys     []ctmap.CtKey4Global
+	values   []ctmap.CtEntry
+	next     uint32
+	capacity uint32
+	revNat   *RevNatContext
+}
+
+func NewBatchContext(m *ctmap.Map, chunkSize uint32) (*batchContext, error) {
+	_, err := ctmap.OpenCTMap(m)
+	if err != nil {
+		return nil, err
+	}
+
+	return &batchContext{
+		m:        m,
+		keys:     make([]ctmap.CtKey4Global, chunkSize),
+		values:   make([]ctmap.CtEntry, chunkSize),
+		next:     0,
+		capacity: chunkSize,
+		revNat:   NewRevNatContext(),
+	}, nil
+}
+
+func (ctx *batchContext) Close() {
+	if ctx.m != nil {
+		ctx.m.Close()
+	}
+}
+
+type RevNatDecision int
+
+const (
+	RevNatWrite RevNatDecision = iota
+	RevNatFlush
+	RevNatBuffered
+)
+
+func getOrOpenServiceMap() (*bpf.Map, error) {
+	if m := bpf.GetMap(lbmap.Service4MapV2Name); m != nil {
+		return m, nil
+	}
+
+	return bpf.OpenMap(bpf.MapPath(lbmap.Service4MapV2Name), &lbmap.Service4Key{}, &lbmap.Service4Value{})
+}
+
+func lookupService(key *lbmap.Service4Key) (*lbmap.Service4Value, error) {
+	m, err := getOrOpenServiceMap()
+	if err != nil || m == nil {
+		return nil, err
+	}
+
+	v, err := m.Lookup(key)
+	if err != nil || v == nil {
+		return nil, err
+	}
+	return v.(*lbmap.Service4Value), nil
+}
+
+func resolveForeignRevNat(key *ctmap.CtKey4Global) (uint16, error) {
+	svcKey := lbmap.NewService4Key(key.DestAddr.IP(), key.SourcePort, key.NextHeader, lb.ScopeExternal, 0)
+	svcVal, err := lookupService(svcKey)
+	if err == nil {
+		return svcVal.RevNat, nil
+	}
+
+	svcKey.Scope = lb.ScopeInternal
+	svcVal, err = lookupService(svcKey)
+	if err != nil {
+		return 0, fmt.Errorf("failed to lookup ct service: %w", err)
+	}
+
+	return svcVal.RevNat, nil
+}
+
+func (ctx *RevNatContext) Handle(
+	key *ctmap.CtKey4Global,
+	val *ctmap.CtEntry,
+) RevNatDecision {
+	// foreign-node revnat
+	foreign := val.RevNAT
+	if foreign == 0 {
+		return RevNatWrite
+	}
+
+	if local, isExist := ctx.revnatMap[foreign]; isExist {
+		// local-node revnat
+		val.RevNAT = local
+		return RevNatWrite
+	}
+
+	// buffer the entry with unknown local revnat
+	ctx.entries[foreign] = append(
+		ctx.entries[foreign],
+		UnresolvedEntry{
+			key: key,
+			val: val,
+		},
+	)
+
+	if key.Flags&ctmap.TUPLE_F_SERVICE == 0 {
+		return RevNatBuffered
+	}
+
+	// conntrack have service type - try resolve local revnat
+	local, err := resolveForeignRevNat(key)
+	if err != nil {
+		log.WithFields(logrus.Fields{
+			"revNat": foreign,
+			"error":  err,
+		}).Debug("Failed resolve foreign RevNat to local RevNat")
+		return RevNatBuffered
+	}
+
+	ctx.revnatMap[foreign] = local
+	return RevNatFlush
+}
+
+type RevNatFlushCallback func(
+	key *ctmap.CtKey4Global,
+	val *ctmap.CtEntry,
+)
+
+func (ctx *RevNatContext) Flush(
+	foreign uint16,
+	cb RevNatFlushCallback,
+) {
+	entries, ok := ctx.entries[foreign]
+	if !ok {
+		return
+	}
+
+	local, ok := ctx.revnatMap[foreign]
+	if !ok {
+		return
+	}
+
+	for _, e := range entries {
+		e.val.RevNAT = local
+		cb(e.key, e.val)
+	}
+
+	delete(ctx.entries, foreign)
+}
+
+func (ctx *batchContext) Append(k *ctmap.CtKey4Global, v *ctmap.CtEntry) {
+	state := ctx.revNat.Handle(k, v)
+	switch state {
+	case RevNatWrite:
+		ctx.Write(k, v)
+	case RevNatFlush:
+		ctx.revNat.Flush(v.RevNAT, func(
+			key *ctmap.CtKey4Global,
+			val *ctmap.CtEntry,
+		) {
+			ctx.Write(key, val)
+		})
+	}
+}
+
+func (ctx *batchContext) Write(k *ctmap.CtKey4Global, v *ctmap.CtEntry) {
+	curr := ctx.next
+	if curr < ctx.capacity {
+		ctx.keys[curr] = *k
+		ctx.values[curr] = *v
+		ctx.next++
+	}
+
+	isForced := false
+	ctx.Flush(isForced)
+}
+
+func (ctx *batchContext) Flush(isForced bool) {
+	currentCount := ctx.next
+	if currentCount == 0 {
+		return
+	}
+
+	isFull := currentCount == ctx.capacity
+	if !isForced && !isFull {
+		return
+	}
+
+	writtenCount := uint32(0)
+	for writtenCount < currentCount {
+		// only pass the filled and don't yet written part of the arrays
+		keys := ctx.keys[writtenCount:currentCount]
+		values := ctx.values[writtenCount:currentCount]
+		count, err := ctx.m.BatchUpdate(keys, values, nil)
+		if count <= 0 || (err != nil && errors.Is(err, unix.EFAULT)) {
+			log.WithFields(logrus.Fields{
+				"error": err,
+			}).Error("Failed batch update")
+			break
+		}
+		writtenCount += uint32(count)
+	}
+	ctx.next = 0
+}
+
+func flushContexts(ctxs []*batchContext) {
+	for _, ctx := range ctxs {
+		if ctx != nil {
+			ctx.Flush(true)
+			ctx.Close()
+		}
+	}
+}
+
+func appendToContext(tcp *batchContext, udp *batchContext,
+	k *ctmap.CtKey4Global, v *ctmap.CtEntry) {
+	var ctx *batchContext
+	if k.NextHeader == u8proto.TCP && tcp != nil {
+		ctx = tcp
+	} else if k.NextHeader != u8proto.TCP && udp != nil {
+		ctx = udp
+	} else {
+		// context for this conntrack is not available, silently skip
+		return
+	}
+
+	ctx.Append(k, v)
+}
+
+func createContexts() (tcp *batchContext, udp *batchContext) {
+	const chunkSize uint32 = 4096
+	tcp, errTCP := NewBatchContext(ctmap.GetTCPCtMap(), chunkSize)
+	if errTCP != nil {
+		log.WithFields(logrus.Fields{
+			"map":   "tcp4",
+			"error": errTCP,
+		}).Warn("Failed create batch context")
+	}
+
+	udp, errUDP := NewBatchContext(ctmap.GetAnyCtMap(), chunkSize)
+	if errUDP != nil {
+		log.WithFields(logrus.Fields{
+			"map":   "any4",
+			"error": errUDP,
+		}).Warn("Failed create batch context")
+	}
+
+	return
+}
+
+func postConntrackImportHandler(
+	d *Daemon,
+	params PostConntrackImportParams,
+) middleware.Responder {
+	r := params.HTTPRequest
+	defer r.Body.Close()
+
+	const SupportedExportVersion = "1"
+	v := r.Header.Get("Cilium-Conntrack-Export-Version")
+	if v != SupportedExportVersion {
+		return NewPostConntrackImportBadRequest()
+	}
+
+	tcp, udp := createContexts()
+	if tcp == nil && udp == nil {
+		return NewPostConntrackImportInternalServerError()
+	}
+
+	t, _ := timestamp.GetCTCurTime(timestamp.GetClockSourceFromOptions())
+	currTime := uint32(t)
+
+	for {
+		k, v, err := deserializeConntrackFromReader(r.Body)
+		if err != nil {
+			break
+		}
+		// convert from relative value to absolute
+		v.Lifetime += currTime
+		appendToContext(tcp, udp, k, v)
+	}
+
+	flushContexts([]*batchContext{tcp, udp})
+	return NewPostConntrackImportOK()
+}
+
+func getCtMaps() []*ctmap.Map {
+	// our cilium build really support only ipv4
+	ipv4, ipv6 := true, false
+	return ctmap.GlobalMaps(ipv4, ipv6)
+}
+
+func parseIPv4ToBinary(s string) (types.IPv4, error) {
+	var out types.IPv4
+
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return out, fmt.Errorf("invalid IP: %s", s)
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return out, fmt.Errorf("not an IPv4 address: %s", s)
+	}
+
+	copy(out[:], ip4)
+	return out, nil
+}
+
+func writeRawToBuf[T any](buf *bytes.Buffer, v *T) error {
+	size := unsafe.Sizeof(*v)
+	b := unsafe.Slice((*byte)(unsafe.Pointer(v)), size)
+	_, err := buf.Write(b)
+	return err
+}
+
+func serializeConntrack(
+	key *ctmap.CtKey4Global,
+	entry *ctmap.CtEntry,
+) ([]byte, error) {
+	// for performance buffer len must be equal to serialized data
+	buf := bytes.NewBuffer(make([]byte, 0, 68))
+	order := binary.LittleEndian
+
+	// Key = 14 bytes
+	if _, err := buf.Write(key.DestAddr[:]); err != nil {
+		return nil, err
+	}
+	if _, err := buf.Write(key.SourceAddr[:]); err != nil {
+		return nil, err
+	}
+	if err := writeRawToBuf(buf, &key.DestPort); err != nil {
+		return nil, err
+	}
+	if err := writeRawToBuf(buf, &key.SourcePort); err != nil {
+		return nil, err
+	}
+	if err := writeRawToBuf(buf, &key.NextHeader); err != nil {
+		return nil, err
+	}
+	if err := writeRawToBuf(buf, &key.Flags); err != nil {
+		return nil, err
+	}
+
+	// Entry = 54 bytes
+	if err := binary.Write(buf, order, entry.Reserved0); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.BackendID); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.Packets); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.Bytes); err != nil {
+		return nil, err
+	}
+	// TODO convert from abs node specific to relative node-aware value
+	if err := binary.Write(buf, order, entry.Lifetime); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.Flags); err != nil {
+		return nil, err
+	}
+	// revnat value is already in network byte order
+	if err := writeRawToBuf(buf, &entry.RevNAT); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.TxFlagsSeen); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.RxFlagsSeen); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.SourceSecurityID); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.LastTxReport); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, order, entry.LastRxReport); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+func writeBinaryConntrack(
+	w http.ResponseWriter,
+	key *ctmap.CtKey4Global,
+	entry *ctmap.CtEntry,
+	currTime uint32,
+) error {
+	if entry.Lifetime < currTime {
+		// skip expired conntrack
+		return nil
+	}
+	// convert from absolute(node specific) to relative(node aware) value
+	entry.Lifetime -= currTime
+
+	data, err := serializeConntrack(key, entry)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.Write(data)
+	return err
+}
+
+func processCtMap(
+	m *ctmap.Map,
+	w http.ResponseWriter,
+	ctx context.Context,
+	ip4 types.IPv4,
+	isConnClosed *bool,
+	currTime uint32,
+) error {
+	_, err := ctmap.OpenCTMap(m)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	const chunkSize uint32 = 4096
+	kout := make([]ctmap.CtKey4Global, chunkSize)
+	vout := make([]ctmap.CtEntry, chunkSize)
+
+	var cursor ebpf.MapBatchCursor
+	for {
+		// Check cancellation early
+		select {
+		case <-ctx.Done():
+			*isConnClosed = true
+			return nil
+		default:
+		}
+
+		count, batchErr := m.BatchLookup(&cursor, kout, vout, nil)
+		for i := range count {
+			k := &kout[i]
+			v := &vout[i]
+
+			flags := k.GetFlags()
+			src, dst := k.SourceAddr, k.DestAddr
+			isIngress := flags&ctmap.TUPLE_F_IN != 0 || flags&ctmap.TUPLE_F_SERVICE != 0
+			isEgress := flags == ctmap.TUPLE_F_OUT || flags == ctmap.TUPLE_F_RELATED
+			if !(isIngress && ip4 == src || isEgress && ip4 == dst) {
+				continue
+			}
+
+			if err := writeBinaryConntrack(w, k, v, currTime); err != nil {
+				*isConnClosed = true
+				return err
+			}
+		}
+
+		if batchErr != nil {
+			if errors.Is(batchErr, ebpf.ErrKeyNotExist) {
+				return nil // end of map
+			}
+			return batchErr
+		}
+	}
+}
+
+func getConntrackExportHandler(
+	d *Daemon,
+	params GetConntrackExportParams,
+) middleware.Responder {
+	return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
+		r := params.HTTPRequest
+		ctx := r.Context()
+		defer r.Body.Close()
+
+		ip4, err := parseIPv4ToBinary(params.Ip4)
+		if err != nil {
+			http.Error(w, "invalid IPv4 address", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Cilium-Conntrack-Export-Version", "1")
+		w.WriteHeader(http.StatusOK)
+
+		t, _ := timestamp.GetCTCurTime(timestamp.GetClockSourceFromOptions())
+		currTime := uint32(t)
+
+		isConnClosed := false
+		for _, ctMap := range getCtMaps() {
+			if err = processCtMap(ctMap, w, ctx, ip4, &isConnClosed, currTime); err != nil {
+				log.WithFields(logrus.Fields{
+					"map":   ctMap,
+					"error": err,
+				}).Error("Failed process conntrack map")
+			}
+
+			if isConnClosed {
+				log.Debug("client closed connection")
+				break
+			}
+		}
+	})
 }
 
 // getStatus returns the daemon status. If brief is provided a minimal version

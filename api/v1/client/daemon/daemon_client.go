@@ -58,6 +58,50 @@ type Client struct {
 // ClientOption may be used to customize the behavior of Client methods.
 type ClientOption func(*runtime.ClientOperation)
 
+// This client is generated with a few options you might find useful for your swagger spec.
+//
+// Feel free to add you own set of options.
+
+// WithContentType allows the client to force the Content-Type header
+// to negotiate a specific Consumer from the server.
+//
+// You may use this option to set arbitrary extensions to your MIME media type.
+func WithContentType(mime string) ClientOption {
+	return func(r *runtime.ClientOperation) {
+		r.ConsumesMediaTypes = []string{mime}
+	}
+}
+
+// WithContentTypeApplicationJSON sets the Content-Type header to "application/json".
+func WithContentTypeApplicationJSON(r *runtime.ClientOperation) {
+	r.ConsumesMediaTypes = []string{"application/json"}
+}
+
+// WithContentTypeApplicationOctetStream sets the Content-Type header to "application/octet-stream".
+func WithContentTypeApplicationOctetStream(r *runtime.ClientOperation) {
+	r.ConsumesMediaTypes = []string{"application/octet-stream"}
+}
+
+// WithAccept allows the client to force the Accept header
+// to negotiate a specific Producer from the server.
+//
+// You may use this option to set arbitrary extensions to your MIME media type.
+func WithAccept(mime string) ClientOption {
+	return func(r *runtime.ClientOperation) {
+		r.ProducesMediaTypes = []string{mime}
+	}
+}
+
+// WithAcceptApplicationJSON sets the Accept header to "application/json".
+func WithAcceptApplicationJSON(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"application/json"}
+}
+
+// WithAcceptApplicationOctetStream sets the Accept header to "application/octet-stream".
+func WithAcceptApplicationOctetStream(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"application/octet-stream"}
+}
+
 // ClientService is the interface for Client methods
 type ClientService interface {
 	GetCgroupDumpMetadata(params *GetCgroupDumpMetadataParams, opts ...ClientOption) (*GetCgroupDumpMetadataOK, error)
@@ -65,6 +109,8 @@ type ClientService interface {
 	GetClusterNodes(params *GetClusterNodesParams, opts ...ClientOption) (*GetClusterNodesOK, error)
 
 	GetConfig(params *GetConfigParams, opts ...ClientOption) (*GetConfigOK, error)
+
+	GetConntrackExport(params *GetConntrackExportParams, opts ...ClientOption) (*GetConntrackExportOK, error)
 
 	GetDebuginfo(params *GetDebuginfoParams, opts ...ClientOption) (*GetDebuginfoOK, error)
 
@@ -79,6 +125,8 @@ type ClientService interface {
 	GetNodeIds(params *GetNodeIdsParams, opts ...ClientOption) (*GetNodeIdsOK, error)
 
 	PatchConfig(params *PatchConfigParams, opts ...ClientOption) (*PatchConfigOK, error)
+
+	PostConntrackImport(params *PostConntrackImportParams, opts ...ClientOption) (*PostConntrackImportOK, error)
 
 	SetTransport(transport runtime.ClientTransport)
 }
@@ -196,6 +244,44 @@ func (a *Client) GetConfig(params *GetConfigParams, opts ...ClientOption) (*GetC
 	// unexpected success response
 	// safeguard: normally, absent a default response, unknown success responses return an error above: so this is a codegen issue
 	msg := fmt.Sprintf("unexpected success response for GetConfig: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
+}
+
+/*
+GetConntrackExport exports conntrack entries for an IPv4 endpoint
+*/
+func (a *Client) GetConntrackExport(params *GetConntrackExportParams, opts ...ClientOption) (*GetConntrackExportOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewGetConntrackExportParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "GetConntrackExport",
+		Method:             "GET",
+		PathPattern:        "/conntrack/export",
+		ProducesMediaTypes: []string{"application/octet-stream"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetConntrackExportReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+	success, ok := result.(*GetConntrackExportOK)
+	if ok {
+		return success, nil
+	}
+	// unexpected success response
+	// safeguard: normally, absent a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for GetConntrackExport: API contract not enforced by server. Client expected to get an error, but got: %T", result)
 	panic(msg)
 }
 
@@ -476,6 +562,44 @@ func (a *Client) PatchConfig(params *PatchConfigParams, opts ...ClientOption) (*
 	// unexpected success response
 	// safeguard: normally, absent a default response, unknown success responses return an error above: so this is a codegen issue
 	msg := fmt.Sprintf("unexpected success response for PatchConfig: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
+}
+
+/*
+PostConntrackImport imports conntrack entries as plain binary stream
+*/
+func (a *Client) PostConntrackImport(params *PostConntrackImportParams, opts ...ClientOption) (*PostConntrackImportOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewPostConntrackImportParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "PostConntrackImport",
+		Method:             "POST",
+		PathPattern:        "/conntrack/import",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/octet-stream"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &PostConntrackImportReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+	success, ok := result.(*PostConntrackImportOK)
+	if ok {
+		return success, nil
+	}
+	// unexpected success response
+	// safeguard: normally, absent a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for PostConntrackImport: API contract not enforced by server. Client expected to get an error, but got: %T", result)
 	panic(msg)
 }
 
