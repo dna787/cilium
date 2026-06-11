@@ -1731,6 +1731,10 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 				     bool has_l4_header,
 				     const bool skip_xlate,
 				     __u32 *cluster_id __maybe_unused,
+#ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
+				     const bool enable_public_service_snat,
+				     bool *public_service_snat,
+#endif
 				     __s8 *ext_err,
 				     __net_cookie netns_cookie __maybe_unused)
 {
@@ -1741,6 +1745,9 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 	__u32 backend_id = 0;
 	__be32 new_saddr = 0;
 	int ret;
+#ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
+	bool svc_needs_snat = false;
+#endif
 #ifdef ENABLE_SESSION_AFFINITY
 	union lb4_affinity_client_id client_id = {
 		.client_ip = saddr,
@@ -1880,9 +1887,23 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 	if (likely(backend->port))
 		tuple->sport = backend->port;
 
-	return lb4_xlate(ctx, &new_saddr, &saddr,
-			 tuple->nexthdr, l3_off, l4_off, key,
-			 backend, has_l4_header);
+	ret = lb4_xlate(ctx, &new_saddr, &saddr,
+			tuple->nexthdr, l3_off, l4_off, key,
+			backend, has_l4_header);
+	if (IS_ERR(ret))
+		return ret;
+
+#ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
+	if (enable_public_service_snat &&
+	    (lb4_svc_is_loadbalancer(svc) || lb4_svc_is_external_ip(svc)) &&
+	    !(svc->flags2 & SVC_FLAG_FWD_MODE_DSR))
+		svc_needs_snat = true;
+
+	if (public_service_snat)
+		*public_service_snat = svc_needs_snat;
+#endif
+
+	return CTX_ACT_OK;
 no_service:
 	ret = DROP_NO_SERVICE;
 drop_err:
@@ -1899,15 +1920,25 @@ drop_err:
  */
 static __always_inline void lb4_ctx_store_state(struct __ctx_buff *ctx,
 						const struct ct_state *state,
-					       __u16 proxy_port, __u32 cluster_id)
-{
-	ctx_store_meta(ctx, CB_PROXY_MAGIC, (__u32)proxy_port << 16);
-	ctx_store_meta(ctx, CB_CT_STATE, (__u32)state->rev_nat_index << 16 |
-#ifndef DISABLE_LOOPBACK_LB
-		       state->loopback);
-#else
-		       0);
+					       __u16 proxy_port, __u32 cluster_id
+#ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
+					       , bool public_service_snat
 #endif
+					       )
+{
+	__u32 flags = 0;
+
+#ifndef DISABLE_LOOPBACK_LB
+	if (state->loopback)
+		flags |= 1;
+#endif
+#ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
+	if (public_service_snat)
+		flags |= 2;
+#endif
+
+	ctx_store_meta(ctx, CB_PROXY_MAGIC, (__u32)proxy_port << 16);
+	ctx_store_meta(ctx, CB_CT_STATE, (__u32)state->rev_nat_index << 16 | flags);
 	ctx_store_meta(ctx, CB_CLUSTER_ID_EGRESS, cluster_id);
 }
 
@@ -1919,7 +1950,11 @@ static __always_inline void lb4_ctx_store_state(struct __ctx_buff *ctx,
 static __always_inline void
 lb4_ctx_restore_state(struct __ctx_buff *ctx, struct ct_state *state,
 		       __u16 *proxy_port, __u32 *cluster_id __maybe_unused,
-		       bool clear)
+		       bool clear
+#ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
+		       , bool *public_service_snat
+#endif
+		       )
 {
 	__u32 meta = clear ? ctx_load_and_clear_meta(ctx, CB_CT_STATE) :
 			     ctx_load_meta(ctx, CB_CT_STATE);
@@ -1928,6 +1963,10 @@ lb4_ctx_restore_state(struct __ctx_buff *ctx, struct ct_state *state,
 		state->loopback = 1;
 #endif
 	state->rev_nat_index = meta >> 16;
+#ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
+	if (public_service_snat)
+		*public_service_snat = meta & 2;
+#endif
 
 	*proxy_port = clear ? (ctx_load_and_clear_meta(ctx, CB_PROXY_MAGIC) >> 16) :
 			      (ctx_load_meta(ctx, CB_PROXY_MAGIC) >> 16);

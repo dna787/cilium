@@ -712,6 +712,11 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		cDefinesMap["ENABLE_CUSTOM_CALLS"] = "1"
 	}
 
+	if option.Config.EnableDVPPublicServiceSNAT && option.Config.EnableIPv4 &&
+		option.Config.EnableNodePort {
+		cDefinesMap["ENABLE_DVP_PUBLIC_SERVICE_SNAT"] = "1"
+	}
+
 	if option.Config.EnableVTEP {
 		cDefinesMap["ENABLE_VTEP"] = "1"
 		cDefinesMap["VTEP_MAP"] = vtep.Name
