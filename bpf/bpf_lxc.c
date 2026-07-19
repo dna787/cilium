@@ -893,17 +893,50 @@ struct {
 
 #ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
 static __always_inline int
-handle_ipv4_from_lxc_dvp_snat(struct __ctx_buff *ctx, __u32 delivery_flags,
-			      __s8 *ext_err)
+handle_ipv4_from_lxc_dvp_rev_snat(struct __ctx_buff *ctx, __s8 *ext_err)
 {
 	struct trace_ctx trace = {
 		.reason = TRACE_REASON_UNKNOWN,
 		.monitor = 0,
 	};
+	struct ipv4_nat_target target = {
+		.min_port = NODEPORT_PORT_MIN_NAT,
+		.max_port = NODEPORT_PORT_MAX_NAT,
+	};
+	void *data, *data_end;
+	struct iphdr *ip4;
+	int ret;
+
+	if (!revalidate_data(ctx, &data, &data_end, &ip4))
+		return DROP_INVALID;
+
+	ret = snat_v4_rev_nat(ctx, &target, &trace, ext_err);
+	if (ret == NAT_PUNT_TO_STACK || ret == DROP_NAT_NO_MAPPING)
+		return CTX_ACT_OK;
+	if (IS_ERR(ret))
+		return ret;
+
+	ctx_snat_done_set(ctx);
+	return CTX_ACT_OK;
+}
+
+static __always_inline int
+handle_ipv4_from_lxc_dvp_fwd_snat(struct __ctx_buff *ctx, __s8 *ext_err)
+{
+	struct trace_ctx trace = {
+		.reason = TRACE_REASON_UNKNOWN,
+		.monitor = 0,
+	};
+	struct ipv4_nat_target target = {
+		.addr = IPV4_GATEWAY,
+		.min_port = NODEPORT_PORT_MIN_NAT,
+		.max_port = NODEPORT_PORT_MAX_NAT,
+		.from_local_endpoint = true,
+	};
+	struct ipv4_ct_tuple snat_tuple = {};
 	struct ct_buffer4 *ct_buffer;
 	void *data, *data_end;
 	struct iphdr *ip4;
-	enum ct_status ct_status;
 	__u32 zero = 0;
 	int ret;
 
@@ -914,50 +947,15 @@ handle_ipv4_from_lxc_dvp_snat(struct __ctx_buff *ctx, __u32 delivery_flags,
 	if (!ct_buffer)
 		return DROP_INVALID_TC_BUFFER;
 
-	ct_status = (enum ct_status)ct_buffer->ret;
+	snat_v4_init_tuple(ip4, NAT_DIR_EGRESS, &snat_tuple);
+	ret = snat_v4_nat(ctx, &snat_tuple, ip4, ct_buffer->l4_off,
+			  ipv4_has_l4_header(ip4), &target, &trace, ext_err);
+	if (ret == NAT_PUNT_TO_STACK)
+		ret = CTX_ACT_OK;
+	if (IS_ERR(ret))
+		return ret;
 
-	if ((delivery_flags & DVP_LXC_DELIVERY_REV_SNAT) &&
-	    ct_status == CT_REPLY && ip4->daddr == IPV4_GATEWAY) {
-		struct ipv4_nat_target target = {
-			.min_port = NODEPORT_PORT_MIN_NAT,
-			.max_port = NODEPORT_PORT_MAX_NAT,
-		};
-
-		ret = snat_v4_rev_nat(ctx, &target, &trace, ext_err);
-		if (ret == NAT_PUNT_TO_STACK || ret == DROP_NAT_NO_MAPPING) {
-			ret = CTX_ACT_OK;
-		} else if (IS_ERR(ret)) {
-			return ret;
-		} else {
-			ctx_snat_done_set(ctx);
-			if (!revalidate_data(ctx, &data, &data_end, &ip4))
-				return DROP_INVALID;
-		}
-	}
-
-	if (delivery_flags & DVP_LXC_DELIVERY_PUBLIC_SNAT) {
-		struct ipv4_nat_target target = {
-			.addr = IPV4_GATEWAY,
-			.min_port = NODEPORT_PORT_MIN_NAT,
-			.max_port = NODEPORT_PORT_MAX_NAT,
-			.from_local_endpoint = true,
-		};
-		struct ipv4_ct_tuple snat_tuple = {};
-
-		snat_v4_init_tuple(ip4, NAT_DIR_EGRESS, &snat_tuple);
-		ret = snat_v4_nat(ctx, &snat_tuple, ip4, ct_buffer->l4_off,
-				  ipv4_has_l4_header(ip4), &target, &trace,
-				  ext_err);
-		if (ret == NAT_PUNT_TO_STACK)
-			ret = CTX_ACT_OK;
-		if (IS_ERR(ret))
-			return ret;
-
-		ctx_snat_done_set(ctx);
-		if (!revalidate_data(ctx, &data, &data_end, &ip4))
-			return DROP_INVALID;
-	}
-
+	ctx_snat_done_set(ctx);
 	return CTX_ACT_OK;
 }
 #endif /* ENABLE_DVP_PUBLIC_SERVICE_SNAT */
@@ -1512,9 +1510,14 @@ ct_recreate4:
 #endif
 
 		if (delivery_flags & (DVP_LXC_DELIVERY_PUBLIC_SNAT |
-				      DVP_LXC_DELIVERY_REV_SNAT))
-			return tail_call_internal(ctx, CILIUM_CALL_IPV4_DVP_SNAT,
+				      DVP_LXC_DELIVERY_REV_SNAT)) {
+			if (delivery_flags & DVP_LXC_DELIVERY_REV_SNAT)
+				return tail_call_internal(ctx,
+							  CILIUM_CALL_IPV4_DVP_REVSNAT,
+							  ext_err);
+			return tail_call_internal(ctx, CILIUM_CALL_IPV4_DVP_FWD_SNAT,
 						  ext_err);
+		}
 
 		return tail_call_internal(ctx, CILIUM_CALL_IPV4_FROM_LXC_DELIVERY,
 					  ext_err);
@@ -1547,16 +1550,36 @@ finish_ipv4_from_lxc(struct __ctx_buff *ctx, int ret, __u32 dst_sec_identity,
 }
 
 #ifdef ENABLE_DVP_PUBLIC_SERVICE_SNAT
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_DVP_SNAT)
+__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_DVP_REVSNAT)
 static __always_inline
-int tail_handle_ipv4_dvp_snat(struct __ctx_buff *ctx)
+int tail_handle_ipv4_dvp_rev_snat(struct __ctx_buff *ctx)
 {
 	__u32 delivery_flags = ctx_load_meta(ctx, CB_CT_STATE);
 	__u32 dst_sec_identity = 0;
 	__s8 ext_err = 0;
 	int ret;
 
-	ret = handle_ipv4_from_lxc_dvp_snat(ctx, delivery_flags, &ext_err);
+	ret = handle_ipv4_from_lxc_dvp_rev_snat(ctx, &ext_err);
+	if (IS_ERR(ret))
+		return finish_ipv4_from_lxc(ctx, ret, dst_sec_identity, ext_err);
+
+	if (delivery_flags & DVP_LXC_DELIVERY_PUBLIC_SNAT)
+		return tail_call_internal(ctx, CILIUM_CALL_IPV4_DVP_FWD_SNAT,
+					  &ext_err);
+
+	return tail_call_internal(ctx, CILIUM_CALL_IPV4_FROM_LXC_DELIVERY,
+				  &ext_err);
+}
+
+__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_DVP_FWD_SNAT)
+static __always_inline
+int tail_handle_ipv4_dvp_fwd_snat(struct __ctx_buff *ctx)
+{
+	__u32 dst_sec_identity = 0;
+	__s8 ext_err = 0;
+	int ret;
+
+	ret = handle_ipv4_from_lxc_dvp_fwd_snat(ctx, &ext_err);
 	if (IS_ERR(ret))
 		return finish_ipv4_from_lxc(ctx, ret, dst_sec_identity, ext_err);
 
