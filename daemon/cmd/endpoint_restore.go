@@ -20,6 +20,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/cilium/cilium/daemon/cmd/legacy"
+	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/datapath/connector"
 	ipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/types"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
@@ -31,6 +32,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/endpointstate"
 	"github.com/cilium/cilium/pkg/ipam"
+	"github.com/cilium/cilium/pkg/ipam/service/ipallocator"
 	"github.com/cilium/cilium/pkg/ipcache"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
@@ -685,11 +687,54 @@ func (r *endpointRestorer) handleRestoredEndpointsRegeneration(endpoints []*endp
 	close(r.endpointRegenerateComplete)
 }
 
+// pinnedAddr returns the address the endpoint's pod requested with
+// annotation.PodAnnotationIPAddress, or an invalid Addr if it requested none.
+//
+// Safe to call here: validateEndpoint() has already run getPodForEndpoint(),
+// so GetCachedPod's WaitForCacheSync has been satisfied and this is a plain
+// StateDB lookup.
+func (r *endpointRestorer) pinnedAddr(ep *endpoint.Endpoint) netip.Addr {
+	if ep.K8sPodName == "" || ep.K8sNamespace == "" || !r.clientset.IsEnabled() {
+		return netip.Addr{}
+	}
+	pod, err := r.k8sWatcher.GetCachedPod(ep.K8sNamespace, ep.K8sPodName)
+	if err != nil || pod == nil {
+		return netip.Addr{}
+	}
+	addr, err := netip.ParseAddr(pod.Annotations[annotation.PodAnnotationIPAddress])
+	if err != nil {
+		return netip.Addr{}
+	}
+	return addr.Unmap()
+}
+
+// pinnedOutOfRange reports whether err is ipallocator's "not in this node's
+// range" for exactly the address the pod requested.
+//
+// Such an address is deliberately absent from the local bitmap: IPAM accepts a
+// requested address it cannot represent without reserving a slot for it, so that
+// a live-migrating VM keeps its address on the target node (see
+// IPAM.allocatePinnedIP). Re-reserving it on restore therefore cannot succeed,
+// and must not cost the endpoint its restore. Any other endpoint with an
+// out-of-range address still fails, as upstream intends.
+func pinnedOutOfRange(err error, addr, pinned netip.Addr) bool {
+	if !pinned.IsValid() || pinned != addr {
+		return false
+	}
+	var notInRange *ipallocator.ErrNotInRange
+	return errors.As(err, &notInRange)
+}
+
 func (r *endpointRestorer) allocateIPsLocked(ep *endpoint.Endpoint) (err error) {
+	pinned := r.pinnedAddr(ep)
+
 	if option.Config.EnableIPv6 && ep.IPv6.IsValid() {
 		ipv6Pool := ipam.PoolOrDefault(ep.IPv6IPAMPool)
 		_, err = r.ipamManager.AllocateIPWithoutSyncUpstream(ep.IPv6, ep.HumanString()+" [restored]", ipv6Pool)
-		if err != nil {
+		if pinnedOutOfRange(err, ep.IPv6, pinned) {
+			// Clear the named return: the deferred release below fires on it.
+			err = nil
+		} else if err != nil {
 			return fmt.Errorf("unable to reallocate %s IPv6 address: %w", ep.IPv6, err)
 		}
 
@@ -724,6 +769,9 @@ func (r *endpointRestorer) allocateIPsLocked(ep *endpoint.Endpoint) (err error) 
 				logfields.EndpointID, ep.ID,
 				logfields.CEPName, ep.GetK8sNamespaceAndCEPName(),
 			)
+		case pinnedOutOfRange(err, ep.IPv4, pinned):
+			// Clear the named return: the deferred IPv6 release fires on it.
+			err = nil
 		case err != nil:
 			return fmt.Errorf("unable to reallocate %s IPv4 address: %w", ep.IPv4, err)
 		}

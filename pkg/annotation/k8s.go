@@ -44,6 +44,11 @@ const (
 	// PodAnnotationMAC is used to store the MAC address of the Pod.
 	PodAnnotationMAC = CNIPrefix + "/mac-address"
 
+	// PodAnnotationIPAddress pins the Pod's address: IPAM hands out exactly
+	// this address instead of the next free one. Used for workloads whose
+	// address is part of their identity, e.g. virtual machines.
+	PodAnnotationIPAddress = CNIPrefix + "/ipAddress"
+
 	// PolicyName / PolicyNameAlias is an optional annotation to the NetworkPolicy
 	// resource which specifies the name of the policy node to which all
 	// rules should be applied to.

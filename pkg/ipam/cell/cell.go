@@ -24,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/ipmasq"
 	k8sResources "github.com/cilium/cilium/pkg/k8s"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	k8sTables "github.com/cilium/cilium/pkg/k8s/tables"
 	"github.com/cilium/cilium/pkg/k8s/watchers"
 	"github.com/cilium/cilium/pkg/mtu"
 	"github.com/cilium/cilium/pkg/node"
@@ -88,6 +89,7 @@ type ipamParams struct {
 	JobGroup   job.Group
 	DB         *statedb.DB
 	PodIPPools statedb.Table[podippool.LocalPodIPPool]
+	Pods       statedb.Table[k8sTables.LocalPod]
 }
 
 func newIPAddressManager(params ipamParams, c ipamConfig) (*ipam.IPAM, error) {
@@ -110,6 +112,7 @@ func newIPAddressManager(params ipamParams, c ipamConfig) (*ipam.IPAM, error) {
 		DB:                        params.DB,
 		JobGroup:                  params.JobGroup,
 		PodIPPools:                params.PodIPPools,
+		Pods:                      params.Pods,
 		OnlyMasqueradeDefaultPool: c.OnlyMasqueradeDefaultPool,
 	})
 

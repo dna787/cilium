@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/cilium/pkg/ipam/podippool"
 	"github.com/cilium/cilium/pkg/ipmasq"
 	"github.com/cilium/cilium/pkg/k8s/client"
+	k8sTables "github.com/cilium/cilium/pkg/k8s/tables"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
@@ -135,6 +136,10 @@ type IPAM struct {
 
 	db         *statedb.DB
 	podIPPools statedb.Table[podippool.LocalPodIPPool]
+
+	// pods is the local-pods table, used to resolve the
+	// annotation.PodAnnotationIPAddress of the pod an allocation is for.
+	pods statedb.Table[k8sTables.LocalPod]
 
 	onlyMasqueradeDefaultPool bool
 }
