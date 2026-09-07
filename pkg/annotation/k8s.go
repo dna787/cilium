@@ -44,6 +44,17 @@ const (
 	// PodAnnotationMAC is used to store the MAC address of the Pod.
 	PodAnnotationMAC = CNIPrefix + "/mac-address"
 
+	// PodAnnotationIPAddress pins the Pod's address: IPAM hands out exactly
+	// this address instead of the next free one. Used for workloads whose
+	// address is part of their identity, e.g. virtual machines.
+	PodAnnotationIPAddress = CNIPrefix + "/ipAddress"
+
+	// PodAnnotationNetworksSpec pins the Pod's address too, as one entry of a
+	// JSON list describing every network attached to the Pod. It takes
+	// precedence over PodAnnotationIPAddress, which is the older single-valued
+	// form of the same request.
+	PodAnnotationNetworksSpec = "network.deckhouse.io/networks-spec"
+
 	// PolicyName / PolicyNameAlias is an optional annotation to the NetworkPolicy
 	// resource which specifies the name of the policy node to which all
 	// rules should be applied to.

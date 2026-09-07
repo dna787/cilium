@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/cilium/pkg/ipam/podippool"
 	"github.com/cilium/cilium/pkg/ipmasq"
 	"github.com/cilium/cilium/pkg/k8s/client"
+	k8sTables "github.com/cilium/cilium/pkg/k8s/tables"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
@@ -89,6 +90,7 @@ type NewIPAMParams struct {
 
 	DB                        *statedb.DB
 	PodIPPools                statedb.Table[podippool.LocalPodIPPool]
+	Pods                      statedb.Table[k8sTables.LocalPod]
 	OnlyMasqueradeDefaultPool bool
 }
 
@@ -113,6 +115,7 @@ func NewIPAM(params NewIPAMParams) *IPAM {
 		jg:                        params.JobGroup,
 		db:                        params.DB,
 		podIPPools:                params.PodIPPools,
+		pods:                      params.Pods,
 		onlyMasqueradeDefaultPool: params.OnlyMasqueradeDefaultPool,
 	}
 }

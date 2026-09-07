@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/ipam/service/ipallocator"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/time"
@@ -66,6 +67,12 @@ func (ipam *IPAM) allocateIP(ip netip.Addr, owner string, pool Pool, needSyncUps
 	ipam.allocatorMutex.Lock()
 	defer ipam.allocatorMutex.Unlock()
 
+	return ipam.allocateIPLocked(ip, owner, pool, needSyncUpstream)
+}
+
+// allocateIPLocked is allocateIP without taking allocatorMutex, for callers
+// that already hold it.
+func (ipam *IPAM) allocateIPLocked(ip netip.Addr, owner string, pool Pool, needSyncUpstream bool) (result *AllocationResult, err error) {
 	if pool == "" {
 		return nil, fmt.Errorf("unable to restore IP %s for %q: pool name must be provided", ip, owner)
 	}
@@ -141,7 +148,70 @@ func (ipam *IPAM) allocateIP(ip netip.Addr, owner string, pool Pool, needSyncUps
 	return
 }
 
-func (ipam *IPAM) allocateNextFamily(family Family, owner string, pool Pool, needSyncUpstream bool) (result *AllocationResult, err error) {
+// allocatePinnedIP allocates the address a pod pinned with
+// annotation.PodAnnotationIPAddress. Must be called with allocatorMutex held.
+//
+// The address is not necessarily one this node's allocator can represent. DVP
+// live-migrates a virtual machine by running a second pod for it on the target
+// node while the first is still running, and both pods carry the VM's address:
+// on the target node that address belongs to the source node's allocation CIDR,
+// and a VM's address may come from a subnet unrelated to the pod subnet
+// altogether. So ErrNotInRange is an expected outcome here, not a failure --
+// such an address is accepted but left out of the local bitmap, which has no
+// slot to represent it.
+//
+// Reserving a slot anyway is what the pre-1.20 version of this patch did, by
+// deleting the range check from ipallocator.Range.Allocate. Because
+// Range.contains reports offset 0 for anything out of range, every foreign
+// address aliased onto the first address of the node's own CIDR: it consumed a
+// real address, and the second such pod on a node then collided with the first
+// -- which is why that version had to delete the ErrAllocated check as well,
+// losing duplicate detection for ordinary addresses too.
+//
+// Duplicates are still refused per node: ErrAllocated for an address in the
+// local CIDR, and the IP owner map for one outside it. Two pods on *different*
+// nodes may hold the same address, which is the migration window itself; which
+// of them owns it cluster-wide is decided by the pod-common-ip-priority label.
+func (ipam *IPAM) allocatePinnedIP(addr netip.Addr, owner string, pool Pool, needSyncUpstream bool) (result *AllocationResult, err error) {
+	ipam.logger.Debug(
+		"Allocating pinned IP",
+		logfields.IPAddr, addr,
+		logfields.Owner, owner,
+		logfields.PoolName, pool,
+	)
+
+	result, err = ipam.allocateIPLocked(addr, owner, pool, needSyncUpstream)
+	if err == nil {
+		return result, nil
+	}
+
+	// Anything other than "this node's allocator cannot represent that address"
+	// is a real failure -- ErrAllocated in particular, which is how a second pod
+	// on this node asking for an address already in use gets refused.
+	var notInRange *ipallocator.ErrNotInRange
+	if !errors.As(err, &notInRange) {
+		return nil, err
+	}
+
+	// Excluded addresses need no check here: allocateIPLocked tests exclusion
+	// before it reaches the allocator and fails with a plain error, so an
+	// excluded address never gets this far.
+	if prev := ipam.getIPOwner(addr.String(), pool); prev != "" && prev != owner {
+		return nil, fmt.Errorf("pinned IP %s is already in use on this node by %s", addr, prev)
+	}
+
+	ipam.logger.Debug(
+		"Allocated pinned IP from outside the local allocation CIDR",
+		logfields.IPAddr, addr,
+		logfields.Owner, owner,
+	)
+	ipam.registerIPOwner(addr, owner, pool)
+	metrics.IPAMEvent.WithLabelValues(metricAllocate, string(DeriveFamily(addr))).Inc()
+
+	return &AllocationResult{IP: addr, IPPoolName: pool}, nil
+}
+
+func (ipam *IPAM) allocateNextFamily(family Family, owner string, pool Pool, needSyncUpstream bool, pinned netip.Addr) (result *AllocationResult, err error) {
 	var allocator Allocator
 	switch family {
 	case IPv6:
@@ -174,6 +244,13 @@ func (ipam *IPAM) allocateNextFamily(family Family, owner string, pool Pool, nee
 		if err != nil {
 			return
 		}
+	}
+
+	// The pod pinned its address with annotation.PodAnnotationIPAddress. It was
+	// resolved by the caller, before allocatorMutex was taken -- see the
+	// commentary in requested_ip.go for why the lookup cannot happen here.
+	if pinned.IsValid() {
+		return ipam.allocatePinnedIP(pinned, owner, pool, needSyncUpstream)
 	}
 
 	for {
@@ -214,23 +291,37 @@ func (ipam *IPAM) allocateNextFamily(family Family, owner string, pool Pool, nee
 
 // AllocateNextFamily allocates the next IP of the requested address family
 func (ipam *IPAM) AllocateNextFamily(family Family, owner string, pool Pool) (result *AllocationResult, err error) {
+	// Resolved before the lock is taken: the lookup reads a StateDB table and
+	// may wait for the pod to appear in it, and allocatorMutex is the agent's
+	// single global IPAM lock.
+	pinned, err := ipam.resolveRequestedIP(owner, family)
+	if err != nil {
+		return nil, err
+	}
+
 	ipam.allocatorMutex.Lock()
 	defer ipam.allocatorMutex.Unlock()
 
 	needSyncUpstream := true
 
-	return ipam.allocateNextFamily(family, owner, pool, needSyncUpstream)
+	return ipam.allocateNextFamily(family, owner, pool, needSyncUpstream, pinned)
 }
 
 // AllocateNextFamilyWithoutSyncUpstream allocates the next IP of the requested address family
 // without syncing upstream
 func (ipam *IPAM) AllocateNextFamilyWithoutSyncUpstream(family Family, owner string, pool Pool) (result *AllocationResult, err error) {
+	// See AllocateNextFamily: resolved outside allocatorMutex.
+	pinned, err := ipam.resolveRequestedIP(owner, family)
+	if err != nil {
+		return nil, err
+	}
+
 	ipam.allocatorMutex.Lock()
 	defer ipam.allocatorMutex.Unlock()
 
 	needSyncUpstream := false
 
-	return ipam.allocateNextFamily(family, owner, pool, needSyncUpstream)
+	return ipam.allocateNextFamily(family, owner, pool, needSyncUpstream, pinned)
 }
 
 // AllocateNext allocates the next available IPv4 and IPv6 address out of the
