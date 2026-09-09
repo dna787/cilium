@@ -49,6 +49,10 @@
 #include "lib/fib.h"
 #include "lib/nodeport.h"
 #include "lib/policy_log.h"
+
+#ifdef ENABLE_DHCPD
+#include "lib/dhcp.h"
+#endif
 #include "lib/vtep.h"
 #include "lib/subnet.h"
 
@@ -1822,6 +1826,15 @@ int cil_from_container(struct __ctx_buff *ctx)
 #endif /* ENABLE_IPV6 */
 #ifdef ENABLE_IPV4
 	case bpf_htons(ETH_P_IP):
+#ifdef ENABLE_DHCPD
+		/* Serve the pod's own DHCP exchange here and reflect the reply
+		 * straight back into it, ahead of any policy or load balancing
+		 * work. Only DHCP traffic is claimed; everything else falls
+		 * through to the tail call below untouched.
+		 */
+		if (unlikely(handle_dhcp_request(ctx, &ret)))
+			break;
+#endif
 		ret = tail_call_internal(ctx, CILIUM_CALL_IPV4_FROM_LXC, &ext_err);
 		sec_label = SECLABEL_IPV4;
 		break;

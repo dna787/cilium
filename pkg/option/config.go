@@ -290,6 +290,15 @@ const (
 	// EnableIPMasqAgent enables BPF ip-masq-agent
 	EnableIPMasqAgent = "enable-ip-masq-agent"
 
+	// DhcpdEnabled enables the BPF DHCP server for pods
+	DhcpdEnabled = "dhcpd-enabled"
+
+	// DhcpdClusterDNS is the DNS server address handed out by the BPF DHCP server
+	DhcpdClusterDNS = "dhcpd-cluster-dns"
+
+	// DhcpdClusterDomain is the search domain handed out by the BPF DHCP server
+	DhcpdClusterDomain = "dhcpd-cluster-domain"
+
 	// EnableEgressGateway enables the egress gateway
 	EnableEgressGateway = "enable-egress-gateway"
 
@@ -1477,6 +1486,9 @@ type DaemonConfig struct {
 	EnableBPFMasquerade         bool
 	EnableMasqueradeRouteSource bool
 	EnableIPMasqAgent           bool
+	DhcpdEnabled                bool
+	DhcpdClusterDNS             string
+	DhcpdClusterDomain          string
 
 	EnableBPFClockProbe    bool
 	EnableEgressGateway    bool
@@ -1953,6 +1965,7 @@ var (
 		BPFEventsTraceEnabled:         defaults.BPFEventsTraceEnabled,
 		BPFConntrackAccounting:        defaults.BPFConntrackAccounting,
 		EnableEnvoyConfig:             defaults.EnableEnvoyConfig,
+		DhcpdEnabled:                  defaults.DhcpdEnabled,
 
 		EnableNonDefaultDenyPolicies: defaults.EnableNonDefaultDenyPolicies,
 
@@ -2528,6 +2541,24 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	}
 	c.EnableBPFClockProbe = vp.GetBool(EnableBPFClockProbe)
 	c.EnableIPMasqAgent = vp.GetBool(EnableIPMasqAgent)
+	c.DhcpdEnabled = vp.GetBool(DhcpdEnabled)
+	c.DhcpdClusterDNS = vp.GetString(DhcpdClusterDNS)
+	c.DhcpdClusterDomain = vp.GetString(DhcpdClusterDomain)
+
+	// Validated at startup rather than when the headerfile is written: these are
+	// cluster-wide values baked into the datapath as compile time constants, so a
+	// bad one would otherwise fail every endpoint regeneration on the node with
+	// nothing naming the option at fault.
+	if c.DhcpdEnabled {
+		if ip := net.ParseIP(c.DhcpdClusterDNS); ip == nil || ip.To4() == nil {
+			logging.Fatal(logger, fmt.Sprintf("Option --%s requires an IPv4 address, got %q",
+				DhcpdClusterDNS, c.DhcpdClusterDNS))
+		}
+		if c.DhcpdClusterDomain == "" {
+			logging.Fatal(logger, fmt.Sprintf("Option --%s must be set when --%s is enabled",
+				DhcpdClusterDomain, DhcpdEnabled))
+		}
+	}
 	c.EnableEgressGateway = vp.GetBool(EnableEgressGateway)
 	c.EnableEnvoyConfig = vp.GetBool(EnableEnvoyConfig)
 	c.InstallIptRules = vp.GetBool(InstallIptRules)
