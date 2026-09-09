@@ -202,6 +202,10 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 
 	identityLbls := maps.Clone(apiLabels)
 
+	if err := m.applyDefaultMACs(ep); err != nil {
+		return invalidDataError(ep, err)
+	}
+
 	if ep.K8sNamespaceAndPodNameIsSet() && m.clientset.IsEnabled() {
 		pod, k8sMetadata, err := m.handleOutdatedPodInformer(ctx, ep)
 		if errors.Is(err, endpointmetadata.ErrPodStoreOutdated) {
@@ -544,4 +548,73 @@ func (m *endpointAPIManager) ModifyEndpointIdentityLabelsFromAPI(id string, add,
 	}
 
 	return PatchEndpointIDLabelsOKCode, nil
+}
+
+// applyDefaultMACs gives the endpoint's devices the cluster-wide MAC addresses
+// configured with option.EndpointInterfaceMAC and
+// option.EndpointInterfaceHostMAC. Deckhouse Virtualization needs both to be
+// predictable: a VM keeps its address across a live migration, and the host side
+// address is what the pod ARPs to reach its gateway, so a value that differs
+// between nodes blackholes a migrated VM until its neighbour entry expires.
+//
+// It is called before the pod's own annotations are read, so a pod carrying
+// upstream's annotation.PodAnnotationMAC still overrides the cluster default.
+// Precedence is annotation > cluster default > whatever the kernel picked.
+//
+// The two sides are applied differently because upstream only built one of them:
+//
+//   - container side: nothing to do beyond recording it. The CNI plugin creates
+//     the device with a random address, reports it, and then rewrites the
+//     interface inside the netns with whatever the agent answers with -- see the
+//     isLayer2 branch in plugins/cilium-cni/cmd/cmd.go. Setting ep.mac is enough.
+//
+//   - host side: no such path exists, ep.HostMac is only ever reported upwards.
+//     The agent runs in the host netns, so it rewrites the device itself and then
+//     records the result in nodeMAC, which is what cilium_lxc is programmed from.
+//     Doing it here keeps that ahead of regeneration, so the map and the device
+//     cannot disagree.
+//
+// netkit is deliberately not covered: it assigns device MACs only in L2 mode, and
+// the plugin likewise applies the returned address only in L2 mode, so both
+// options are inert under netkit L3. Deckhouse runs the veth datapath.
+func (m *endpointAPIManager) applyDefaultMACs(ep *endpoint.Endpoint) error {
+	if ep.IsSecondaryInterface() {
+		return nil
+	}
+
+	if addr := option.Config.EndpointInterfaceMAC; addr != "" {
+		parsed, err := mac.ParseMAC(addr)
+		if err != nil {
+			return fmt.Errorf("invalid %s %q: %w", option.EndpointInterfaceMAC, addr, err)
+		}
+		ep.SetMac(parsed)
+	}
+
+	addr := option.Config.EndpointInterfaceHostMAC
+	if addr == "" {
+		return nil
+	}
+	parsed, err := mac.ParseMAC(addr)
+	if err != nil {
+		return fmt.Errorf("invalid %s %q: %w", option.EndpointInterfaceHostMAC, addr, err)
+	}
+
+	ifName := ep.HostInterface()
+	if ifName == "" {
+		return nil
+	}
+
+	if err := mac.ReplaceMacAddressWithLinkName(ifName, parsed.String()); err != nil {
+		// Not fatal: the endpoint is otherwise healthy, and nodeMAC is left
+		// holding the address the device really has, so the datapath stays
+		// consistent with reality.
+		ep.Logger("api").Warn("Unable to set the host side MAC address of the endpoint device",
+			logfields.Error, err,
+			logfields.Interface, ifName,
+		)
+		return nil
+	}
+	ep.SetNodeMAC(parsed)
+
+	return nil
 }

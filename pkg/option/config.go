@@ -865,6 +865,15 @@ const (
 	// K8sHeartbeatTimeout configures the timeout for apiserver heartbeat
 	K8sHeartbeatTimeout = "k8s-heartbeat-timeout"
 
+	// EndpointInterfaceMAC defines the MAC address given to the container side
+	// of every endpoint's device, unless the pod overrides it with the
+	// annotation.PodAnnotationMAC annotation. Empty means "let the kernel pick".
+	EndpointInterfaceMAC = "endpoint-interface-mac"
+
+	// EndpointInterfaceHostMAC defines the MAC address given to the host side of
+	// every endpoint's device. Empty means "let the kernel pick".
+	EndpointInterfaceHostMAC = "endpoint-interface-host-mac"
+
 	// EnableIPv4FragmentsTrackingName is the name of the option to enable
 	// IPv4 fragments tracking for L4-based lookups. Needs LRU map support.
 	EnableIPv4FragmentsTrackingName = "enable-ipv4-fragment-tracking"
@@ -1598,6 +1607,14 @@ type DaemonConfig struct {
 
 	// LocalRouterIPv6 is the link-local IPv6 address used for Cilium's router device
 	LocalRouterIPv6 string
+
+	// EndpointInterfaceMAC is the MAC address for the container side of an
+	// endpoint's device, or empty to let the kernel pick one.
+	EndpointInterfaceMAC string
+
+	// EndpointInterfaceHostMAC is the MAC address for the host side of an
+	// endpoint's device, or empty to let the kernel pick one.
+	EndpointInterfaceHostMAC string
 
 	// EnableEndpointRoutes enables use of per endpoint routes
 	EnableEndpointRoutes bool
@@ -2492,6 +2509,23 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.LogSystemLoadConfig = vp.GetBool(LogSystemLoadConfigName)
 	c.LocalRouterIPv4 = vp.GetString(LocalRouterIPv4)
 	c.LocalRouterIPv6 = vp.GetString(LocalRouterIPv6)
+	c.EndpointInterfaceMAC = vp.GetString(EndpointInterfaceMAC)
+	c.EndpointInterfaceHostMAC = vp.GetString(EndpointInterfaceHostMAC)
+
+	// Validate here rather than per endpoint: these are cluster-wide values, so a
+	// typo would otherwise fail every endpoint creation on the node at runtime.
+	// Refusing to start is louder and leaves nothing half-configured.
+	for name, value := range map[string]string{
+		EndpointInterfaceMAC:     c.EndpointInterfaceMAC,
+		EndpointInterfaceHostMAC: c.EndpointInterfaceHostMAC,
+	} {
+		if value == "" {
+			continue
+		}
+		if _, err := net.ParseMAC(value); err != nil {
+			logging.Fatal(logger, fmt.Sprintf("Invalid MAC address in --%s: %q", name, value), logfields.Error, err)
+		}
+	}
 	c.EnableBPFClockProbe = vp.GetBool(EnableBPFClockProbe)
 	c.EnableIPMasqAgent = vp.GetBool(EnableIPMasqAgent)
 	c.EnableEgressGateway = vp.GetBool(EnableEgressGateway)
