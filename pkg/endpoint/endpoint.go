@@ -1470,6 +1470,15 @@ func (e *Endpoint) SetMac(mac mac.MAC) {
 	e.mac = mac
 }
 
+// SetNodeMAC modifies the endpoint's host side MAC, which is what cilium_lxc is
+// programmed from. Only meaningful together with actually changing the address
+// of the host side device -- the two must not drift apart.
+func (e *Endpoint) SetNodeMAC(mac mac.MAC) {
+	e.unconditionalLock()
+	defer e.unlock()
+	e.nodeMAC = mac
+}
+
 // IsSecondaryInterface reports whether this endpoint represents a seondary interface in
 // case of more than once interface per pod.
 func (e *Endpoint) IsSecondaryInterface() bool {
