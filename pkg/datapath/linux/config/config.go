@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"text/template"
 
 	"github.com/vishvananda/netlink"
@@ -98,6 +99,44 @@ func NewHeaderfileWriter(p WriterParams) (Writer, error) {
 	}, nil
 }
 
+// ipv4ToHex renders an IPv4 address as the 0xAABBCCDD literal the datapath
+// expects for a compile time constant.
+func ipv4ToHex(ipString string) (string, error) {
+	ip := net.ParseIP(ipString)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IPv4 address: %s", ipString)
+	}
+
+	ipBytes := ip.To4()
+	if ipBytes == nil {
+		return "", fmt.Errorf("not an IPv4 address: %s", ipString)
+	}
+
+	return fmt.Sprintf("0x%02X%02X%02X%02X", ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3]), nil
+}
+
+// generateDomainSearchList renders a single domain as a DHCP option 119 byte
+// array initialiser: option code, total length, then one length prefixed label
+// per dot separated component, terminated by a zero length root label.
+func generateDomainSearchList(domain string) string {
+	labels := strings.Split(domain, ".")
+	var result []string
+	result = append(result, "119") // option code
+	result = append(result, "0")   // total length, filled in below
+	totalLength := 1
+	for _, label := range labels {
+		labelLength := len(label)
+		result = append(result, fmt.Sprintf("%d", labelLength))
+		for _, c := range label {
+			result = append(result, fmt.Sprintf("'%c'", c))
+		}
+		totalLength += 1 + labelLength
+	}
+	result = append(result, "0")
+	result[1] = fmt.Sprintf("%d", totalLength)
+	return fmt.Sprintf("{ %s }", strings.Join(result, ", "))
+}
+
 func writeIncludes(w io.Writer) (int, error) {
 	return fmt.Fprintf(w, "#include \"lib/utils.h\"\n\n")
 }
@@ -155,6 +194,23 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *config.Config) erro
 	}
 
 	cDefinesMap["CILIUM_IPV4_FRAG_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", option.Config.FragmentsMapEntries)
+
+	// The BPF DHCP server. No IPv4 guard is needed: the hook in bpf_lxc.c sits
+	// inside #ifdef ENABLE_IPV4, so with IPv4 disabled these defines are never
+	// referenced. Both values are validated at agent startup, so the error
+	// below cannot fire in practice.
+	if option.Config.DhcpdEnabled {
+		cDefinesMap["ENABLE_DHCPD"] = "1"
+		ipv4DNS, err := ipv4ToHex(option.Config.DhcpdClusterDNS)
+		if err != nil {
+			return err
+		}
+		cDefinesMap["IPV4_DNS_SERVER"] = ipv4DNS
+		cDefinesMap["DOMAIN_SEARCH_LIST_VALUE"] = generateDomainSearchList(option.Config.DhcpdClusterDomain)
+		// RouteMTU, the same value the devices themselves carry, handed to the
+		// client as option 26 so a VM inside the pod cannot choose a larger one.
+		cDefinesMap["DHCP_INTERFACE_MTU"] = fmt.Sprintf("%d", cfg.RouteMTU)
+	}
 
 	// --- WARNING: THIS CONFIGURATION METHOD IS DEPRECATED, SEE FUNCTION DOC ---
 

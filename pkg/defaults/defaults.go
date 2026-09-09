@@ -529,6 +529,15 @@ const (
 	// EnableSourceIPVerification is the default value for source ip validation
 	EnableSourceIPVerification = true
 
+	// DhcpdEnabled is the default state of the BPF DHCP server for pods
+	DhcpdEnabled = false
+
+	// DhcpdClusterDNS is the default DNS server handed out by the BPF DHCP server
+	DhcpdClusterDNS = ""
+
+	// DhcpdClusterDomain is the default search domain handed out by the BPF DHCP server
+	DhcpdClusterDomain = ""
+
 	// ConnectivityProbeFrequencyRatio is the default connectivity probe frequency
 	ConnectivityProbeFrequencyRatio = 0.5
 
