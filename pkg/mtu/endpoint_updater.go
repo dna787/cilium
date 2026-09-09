@@ -197,7 +197,10 @@ func (emu *endpointUpdater) updateHostNSDevices(rx statedb.ReadTxn, routeMtus []
 			continue
 		}
 
-		if err := netlink.LinkSetMTU(link, defaultRouteMTU.DeviceMTU); err != nil {
+		// RouteMTU -- see the note in plugins/cilium-cni/cmd/cmd.go. Without this
+		// the host side devices are reset to DeviceMTU on every MTU update, undoing
+		// what the CNI plugin set at creation time.
+		if err := netlink.LinkSetMTU(link, defaultRouteMTU.RouteMTU); err != nil {
 			// Ignore any errors. It is possible that the device has been removed between the time
 			// we got the link and now.
 			continue
@@ -302,7 +305,10 @@ func defaultRouteHook(routeMTUs []RouteMTU) error {
 			continue
 		}
 
-		netlink.LinkSetMTU(link, defaultRouteMTU.DeviceMTU)
+		// RouteMTU -- see the note in plugins/cilium-cni/cmd/cmd.go. This hook runs
+		// inside every endpoint netns and the health netns, so it is what keeps the
+		// pod side device from drifting back to DeviceMTU.
+		netlink.LinkSetMTU(link, defaultRouteMTU.RouteMTU)
 
 		routes, err := safenetlink.RouteList(link, netlink.FAMILY_ALL)
 		if err != nil {

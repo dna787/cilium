@@ -726,7 +726,12 @@ func (cmd *Cmd) Add(args *skel.CmdArgs) (err error) {
 		GSOIPv6MaxSize: int(conf.GSOMaxSize),
 		GROIPv4MaxSize: int(conf.GROIPv4MaxSize),
 		GSOIPv4MaxSize: int(conf.GSOIPv4MaxSize),
-		DeviceMTU:      int(conf.DeviceMTU),
+		// RouteMTU, not DeviceMTU. A virtual machine running inside the pod takes
+		// its MTU from the link, not from the pod's default route, so a device left
+		// at DeviceMTU makes the guest emit frames the overlay cannot carry.
+		// configureLinkPair applies this to both ends of the pair, for veth and
+		// netkit alike.
+		DeviceMTU:      int(conf.RouteMTU),
 		DeviceHeadroom: uint16(conf.DeviceHeadroom),
 		DeviceTailroom: uint16(conf.DeviceTailroom),
 	}

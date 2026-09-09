@@ -295,7 +295,9 @@ func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpoint
 		GSOIPv6MaxSize: bigTCPConfig.GetGSOIPv6MaxSize(),
 		GROIPv4MaxSize: bigTCPConfig.GetGROIPv4MaxSize(),
 		GSOIPv4MaxSize: bigTCPConfig.GetGSOIPv4MaxSize(),
-		DeviceMTU:      mtuConfig.GetDeviceMTU(),
+		// RouteMTU, to match the pod devices -- see the note in
+		// plugins/cilium-cni/cmd/cmd.go.
+		DeviceMTU: mtuConfig.GetRouteMTU(),
 	}
 
 	linkPair, err := h.connectorConfig.NewLinkPair(linkConfig, sysctl)
