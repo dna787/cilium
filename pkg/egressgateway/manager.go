@@ -192,10 +192,6 @@ func NewEgressGatewayManager(p Params) (out struct {
 		return out, fmt.Errorf("egress gateway is not supported in %s identity allocation mode", dcfg.IdentityAllocationMode)
 	}
 
-	if dcfg.EnableCiliumEndpointSlice {
-		return out, errors.New("egress gateway is not supported in combination with the CiliumEndpointSlice feature")
-	}
-
 	// TODO: refactor config checks for both ipv4 and ipv6, and derive whether the environment supports egress gateway policies for either protocol
 	// We need to make sure that ipv4/v6 only environments only create the necessary resources and don't fail if unneeded features are missing.
 	if !dcfg.EnableIPv4Masquerade || !dcfg.EnableBPFMasquerade {
