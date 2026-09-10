@@ -131,6 +131,13 @@ func (i *ICMPField) UnmarshalJSON(value []byte) error {
 		return err
 	}
 
+	// A missing or null "type" leaves this nil. IntOrString.String() tolerates a
+	// nil receiver and returns "<nil>", so the check below does not short
+	// circuit, and IntValue() then dereferences it and panics.
+	if t.Type == nil {
+		return fmt.Errorf("ICMP type must be specified")
+	}
+
 	// If i.Type is ICMP type name, the value should be checked if it belongs to the map for the given family.
 	if t.Type.String() != "0" && t.Type.IntValue() == 0 {
 		name := t.Type.String()

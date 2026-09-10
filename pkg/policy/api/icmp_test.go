@@ -35,4 +35,13 @@ func TestICMPFieldUnmarshal(t *testing.T) {
 	err = json.Unmarshal(value3, &i)
 
 	require.Error(t, err)
+
+	// A missing or explicitly null type used to panic in IntValue().
+	value4 := []byte("{\"family\": \"IPv4\", \"type\": null}")
+	err = json.Unmarshal(value4, &i)
+	require.Error(t, err)
+
+	value5 := []byte("{\"family\": \"IPv4\"}")
+	err = json.Unmarshal(value5, &i)
+	require.Error(t, err)
 }
