@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"net/netip"
 	"slices"
+	"strings"
 
 	"go4.org/netipx"
 	"k8s.io/apimachinery/pkg/types"
@@ -192,6 +193,15 @@ func deviceGetPrimaryAddresses(manager *Manager, iface string) (netip.Addr, neti
 	return primaryIP4, primaryIP6
 }
 
+// egressIPNotAssigned reports whether err is netdevice's "this address is not
+// on any local interface" result for addr, rather than a real lookup failure.
+// netdevice returns a plain fmt.Errorf with no sentinel to match on, so build
+// the same string instead of duplicating its wording here.
+func egressIPNotAssigned(err error, addr netip.Addr) bool {
+	return err != nil &&
+		strings.Contains(err.Error(), fmt.Sprintf("no interface with %s IPv4 assigned to", addr))
+}
+
 func getDeviceWithAddress(manager *Manager, addr netip.Addr) *tables.Device {
 	for dev := range manager.deviceTable.All(manager.db.ReadTxn()) {
 		if dev.HasIP(addr) {
@@ -284,10 +294,22 @@ func (gwc *gatewayConfig) deriveFromPolicyGatewayConfig(manager *Manager, gc *po
 
 				gwc.ifaceName, err = netdevice.GetIfaceWithIPv4Address(gc.egressIP)
 				if err != nil {
-					return fmt.Errorf("failed to retrieve interface with egress IP: %w", err)
+					// A policy may name an egress IP that is not assigned to
+					// any interface on this node -- Deckhouse manages such
+					// addresses outside Cilium, and they may be attached later
+					// or not at all. Upstream logs this once per reconcile,
+					// which is pure noise on those clusters. Carry on with an
+					// empty ifaceName; relaxRPFilter() in manager.go skips it.
+					if !egressIPNotAssigned(err, gc.egressIP) {
+						return fmt.Errorf("failed to retrieve interface with egress IP: %w", err)
+					}
 				}
 
-				if v6Needed {
+				// Only meaningful once an interface was actually found; with an
+				// unassigned egress IP there is nothing to read an IPv6 address
+				// from. Deckhouse runs IPv4 only, so this stays a guard rather
+				// than a second tolerance path.
+				if v6Needed && gwc.ifaceName != "" {
 					egressIP6, err = netdevice.GetIfaceFirstIPv6Address(gwc.ifaceName)
 					if err != nil {
 						return fmt.Errorf("failed to retrieve IPv6 address for egress interface: %w", err)

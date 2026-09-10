@@ -614,6 +614,13 @@ func (manager *Manager) relaxRPFilter() error {
 			}
 
 			ifaceName := gatewayConfig.ifaceName
+			// An egress IP that is not assigned on this node leaves the
+			// interface name empty (see deriveFromPolicyGatewayConfig). There
+			// is no device to relax rp_filter on, and the sysctl path would
+			// build "net.ipv4.conf..rp_filter" and fail.
+			if ifaceName == "" {
+				continue
+			}
 			if _, ok := ifSet[ifaceName]; !ok {
 				ifSet[ifaceName] = struct{}{}
 				sysSettings = append(sysSettings, tables.Sysctl{
