@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/cilium/cilium/pkg/loadinfo"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
+	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
@@ -902,6 +904,41 @@ func (e *Endpoint) deleteMaps() []error {
 	return errors
 }
 
+// movedToAnotherNode reports whether this endpoint's address is already owned by
+// a different node, which is what a VM live migration looks like from the node
+// the VM is leaving: both pods exist briefly, and the datapath's ipcache entry
+// for the shared address now carries a tunnel endpoint.
+//
+// The BPF map is the datapath's own view and encodes exactly this: the tunnel
+// endpoint is unset for an address local to this node. IPCacheMap() returns the
+// instance the datapath cells already created, and Lookup() opens the map
+// itself, so there is nothing to wire up here.
+//
+// Computed once per teardown rather than inside the GC filter: the filter runs
+// for every conntrack entry, and a BPF lookup per entry would be far too costly.
+//
+// IPv4 only, matching the workloads this exists for.
+func (e *Endpoint) movedToAnotherNode() bool {
+	if !e.IPv4.IsValid() {
+		return false
+	}
+
+	key := ipcachemap.NewKey(netip.PrefixFrom(e.IPv4, e.IPv4.BitLen()), uint16(option.Config.ClusterID))
+	value, err := ipcachemap.IPCacheMap(nil).Lookup(&key)
+	if err != nil || value == nil {
+		// Unknown address, or the map is unavailable: fall back to the ordinary
+		// full scrub rather than guessing.
+		return false
+	}
+
+	info, ok := value.(*ipcachemap.RemoteEndpointInfo)
+	if !ok {
+		return false
+	}
+
+	return info.Flags&ipcachemap.FlagHasTunnelEndpoint != 0
+}
+
 // scrubIPsInConntrackTableLocked will run the CTMap garbagecollector with the endpoint IPs.
 func (e *Endpoint) scrubIPsInConntrackTableLocked() {
 	e.ctMapGC.Run(ctmap.GCFilter{
@@ -909,6 +946,8 @@ func (e *Endpoint) scrubIPsInConntrackTableLocked() {
 			{Addr: e.IPv4}: {},
 			{Addr: e.IPv6}: {},
 		},
+		// Keep local clients' connections to an address that has migrated away.
+		MigrationSafeCleanup: e.movedToAnotherNode(),
 	})
 }
 
