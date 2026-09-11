@@ -178,6 +178,25 @@ type GCFilter struct {
 	// passes. It has no impact on CT GC, but can be used to iterate over valid
 	// CT entries.
 	EmitCTEntryCB EmitCTEntryCBFunc
+
+	// MigrationSafeCleanup restricts MatchIPs deletion to the flows the address
+	// itself owned, instead of everything mentioning it.
+	//
+	// Deleting an endpoint normally scrubs every entry whose source or
+	// destination is its address. That is wrong for an address that has moved to
+	// another node: connections which clients still on this node hold open
+	// towards it are now forwarded over the tunnel and must survive, or a live
+	// migration resets exactly the connections it is meant to preserve.
+	//
+	// With this set, only the departing side is removed:
+	//   TUPLE_F_OUT / TUPLE_F_RELATED  when the source matches
+	//   TUPLE_F_IN                     when the destination matches
+	//   TUPLE_F_SERVICE                when the destination matches, as service
+	//                                  entries are stored with the addresses
+	//                                  reversed
+	// Everything else is kept, notably outbound entries where the address is the
+	// destination: those are the local clients.
+	MigrationSafeCleanup bool
 }
 
 // EmitCTEntryCBFunc is the type used for the EmitCTEntryCB callback in GCFilter
@@ -555,7 +574,23 @@ func (f GCFilter) doFiltering(srcIP, dstIP NetAddr, srcPort, dstPort uint16, nex
 	if f.MatchIPs != nil {
 		_, srcIPExists := f.MatchIPs[srcIP]
 		_, dstIPExists := f.MatchIPs[dstIP]
-		if srcIPExists || dstIPExists {
+
+		if f.MigrationSafeCleanup {
+			switch {
+			case flags == TUPLE_F_OUT || flags == TUPLE_F_RELATED:
+				if srcIPExists {
+					return deleteEntry
+				}
+			case flags&TUPLE_F_SERVICE != 0:
+				if dstIPExists {
+					return deleteEntry
+				}
+			case flags&TUPLE_F_IN != 0:
+				if dstIPExists {
+					return deleteEntry
+				}
+			}
+		} else if srcIPExists || dstIPExists {
 			return deleteEntry
 		}
 	}
