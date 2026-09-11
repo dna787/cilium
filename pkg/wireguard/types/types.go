@@ -9,8 +9,12 @@ import (
 )
 
 const (
-	// ListenPort is the port on which the WireGuard tunnel device listens on
-	ListenPort = 51871
+	// ListenPort is the port on which the WireGuard tunnel device listens on.
+	// Deckhouse uses 4287, inside the port range the platform reserves for its
+	// own components; upstream's 51871 is not. Everything derives from this
+	// constant -- the datapath via CONFIG(wg_port), the iptables rules, and the
+	// device itself -- so this is the only place it needs changing.
+	ListenPort = 4287
 	// IfaceName is the name of the WireGuard tunnel device
 	IfaceName = "cilium_wg0"
 	// PrivKeyFilename is the name of the WireGuard private key file
