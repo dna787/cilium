@@ -343,6 +343,9 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *config.Config) erro
 		}
 		cDefinesMap["ENABLE_NODEPORT"] = "1"
 
+		if cfg.LBConfig.EnableLoadBalancerICMPReply {
+			cDefinesMap["ENABLE_LOADBALANCER_ICMP_REPLY"] = "1"
+		}
 		if option.Config.EnableNat46X64Gateway {
 			cDefinesMap["ENABLE_NAT_46X64_GATEWAY"] = "1"
 		}

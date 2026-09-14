@@ -2687,6 +2687,94 @@ drop_err:
 					  METRIC_EGRESS);
 }
 
+#ifdef ENABLE_LOADBALANCER_ICMP_REPLY
+/* Answer an ICMP echo request addressed to a LoadBalancer VIP.
+ *
+ * A VIP has no interface anywhere, so nothing in the stack would ever reply to
+ * a ping of it. Operators and monitoring treat an unanswered ping as the
+ * service being down, so the datapath answers on the VIP's behalf: the request
+ * is turned into a reply in place and sent back out the interface it arrived
+ * on.
+ *
+ * Rate limited per ingress interface, because the reply is generated before any
+ * conntrack or policy work and an unbounded echo flood would otherwise cost one
+ * redirect per request.
+ */
+static __always_inline
+int make_icmp_response_lb4(struct __ctx_buff *ctx,
+					struct iphdr *ip4)
+{
+	void *data, *data_end;
+	struct ethhdr *ethhdr;
+	struct icmphdr *icmphdr;
+	union macaddr smac = {};
+	union macaddr dmac = {};
+	__be32 tmp_addr;
+	__u32 ccsum = 0;
+	struct ratelimit_key rkey = {
+		.usage = RATELIMIT_USAGE_ICMP_LB4,
+	};
+	struct ratelimit_settings settings = {
+		.bucket_size = 1000,
+		.tokens_per_topup = 100,
+		.topup_interval_ns = NSEC_PER_SEC,
+	};
+
+	/* Deliberately the icmpv6 member: it is the same single __u32 netdev_idx,
+	 * and the two buckets stay separate because .usage differs, not because
+	 * of the union member. Adding a member of our own would change
+	 * pkg/datapath/maps/mapkv.btf -- a generated binary file -- which would
+	 * make this patch fail to apply on the next upstream tag that regenerates
+	 * it, and the Deckhouse build has no clang to regenerate it with.
+	 */
+	rkey.key.icmpv6.netdev_idx = ctx_get_ifindex(ctx);
+	if (!ratelimit_check_and_take(&rkey, &settings))
+		return DROP_RATE_LIMITED;
+
+	data = ctx_data(ctx);
+	data_end = ctx_data_end(ctx);
+
+	if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) +
+		sizeof(struct icmphdr) > data_end)
+		return DROP_INVALID;
+
+	if (eth_load_saddr(ctx, smac.addr, 0) < 0)
+		return DROP_INVALID;
+
+	if (eth_load_daddr(ctx, dmac.addr, 0) < 0)
+		return DROP_INVALID;
+
+	icmphdr = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
+
+	if (icmphdr->type != ICMP_ECHO)
+		return CTX_ACT_OK;
+
+	/* Write reversed eth header, ready for egress */
+	ethhdr = data;
+	memcpy(ethhdr->h_dest, smac.addr, sizeof(smac.addr));
+	memcpy(ethhdr->h_source, dmac.addr, sizeof(dmac.addr));
+
+	/* Write reversed ip header, ready for egress */
+	tmp_addr = ip4->daddr;
+	ip4->daddr = ip4->saddr;
+	ip4->saddr = tmp_addr;
+
+	/* Write reversed icmp header */
+	icmphdr->type = ICMP_ECHOREPLY;
+
+	/* ICMP_ECHO is 8 and ICMP_ECHOREPLY is 0, so the type byte drops by 8.
+	 * The type is the high byte of the first checksum word, hence 0x0800
+	 * added back to the one's complement sum rather than a full recompute.
+	 */
+	ccsum = bpf_ntohs(icmphdr->checksum);
+	ccsum += 0x0800;
+	ccsum = (ccsum & 0xFFFF) + (ccsum >> 16);
+	icmphdr->checksum = bpf_htons((__u16)ccsum);
+
+	return redirect_self(ctx);
+}
+#endif /* ENABLE_LOADBALANCER_ICMP_REPLY */
+
 static __always_inline int nodeport_svc_lb4(struct __ctx_buff *ctx,
 					    struct ipv4_ct_tuple *tuple,
 					    const struct lb4_service *svc,
@@ -2954,6 +3042,30 @@ static __always_inline int nodeport_lb4(struct __ctx_buff *ctx,
 	}
 
 	lb4_fill_key(&key, &tuple);
+
+#ifdef ENABLE_LOADBALANCER_ICMP_REPLY
+	if (unlikely(ip4->protocol == IPPROTO_ICMP)) {
+		/* east_west = true stops lb4_lookup_service() before its wildcard
+		 * fallback, so this can only match the port 0 / proto ICMP entry
+		 * the control plane writes per LoadBalancer VIP. It can never match
+		 * the wildcard entry (port 0, proto ANY) that upstream programs for
+		 * LoadBalancer and ClusterIP frontends, whose meaning is "no service
+		 * on this port, drop" rather than "answer".
+		 *
+		 * The entry carries no backends, so the reply is generated here and
+		 * the packet never reaches backend selection. Every other case --
+		 * not a VIP we answer for, rate limited, malformed, or not an echo
+		 * request -- leaves by the same path an unpatched build takes.
+		 */
+		svc = lb4_lookup_service(&key, true);
+		if (svc) {
+			ret = make_icmp_response_lb4(ctx, ip4);
+			if (ret == CTX_ACT_REDIRECT)
+				return ret;
+		}
+		goto skip_service_lookup;
+	}
+#endif /* ENABLE_LOADBALANCER_ICMP_REPLY */
 
 	svc = lb4_lookup_service(&key, false);
 	if (svc)

@@ -1726,7 +1726,17 @@ lb4_extract_tuple(const struct __ctx_buff *ctx, const struct iphdr *ip4, fraginf
 		return ipv4_load_l4_ports(ctx, ip4, fraginfo, l4_off,
 					  CT_EGRESS, &tuple->dport);
 	case IPPROTO_ICMP:
+#ifdef ENABLE_LOADBALANCER_ICMP_REPLY
+		/* Return 0 so the caller goes on to look the service up. The tuple
+		 * keeps nexthdr = IPPROTO_ICMP and dport = 0, which is exactly the
+		 * key the control plane writes for a LoadBalancer VIP, so only a
+		 * VIP can match and every other ICMP packet falls through to
+		 * skip_service_lookup as before.
+		 */
+		return 0;
+#else
 		return DROP_UNSUPP_SERVICE_PROTO;
+#endif
 	default:
 		return DROP_UNKNOWN_L4;
 	}

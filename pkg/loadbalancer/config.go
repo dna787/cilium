@@ -95,6 +95,9 @@ const (
 	// EnableWildcardEntries controls whether the load balancer datapath should
 	// program wildcard service entries into the BPF datapath.
 	EnableWildcardEntries = "bpf-lb-enable-wildcard-entries"
+
+	// EnableLoadBalancerICMPReply enables ICMP reply generation for LoadBalancer services
+	EnableLoadBalancerICMPReply = "enable-loadbalancer-icmp-reply"
 )
 
 // Configuration option defaults
@@ -244,6 +247,9 @@ type UserConfig struct {
 	// EnableWildcardEntries controls whether the load balancer datapath should
 	// program wildcard service entries into the BPF datapath.
 	EnableWildcardEntries bool `mapstructure:"bpf-lb-enable-wildcard-entries"`
+
+	// EnableLoadBalancerICMPReply enables ICMP reply generation for LoadBalancer services
+	EnableLoadBalancerICMPReply bool `mapstructure:"enable-loadbalancer-icmp-reply"`
 }
 
 // ConfigCell provides the [Config] and [ExternalConfig] configurations.
@@ -356,6 +362,8 @@ func (def UserConfig) Flags(flags *pflag.FlagSet) {
 
 	flags.Bool(EnableWildcardEntries, def.EnableWildcardEntries, "Enable service load balancer wildcard entries.")
 	flags.MarkHidden(EnableWildcardEntries)
+
+	flags.Bool(EnableLoadBalancerICMPReply, def.EnableLoadBalancerICMPReply, "Enable ICMP reply generation for LoadBalancer services")
 }
 
 // NewConfig takes the user-provided configuration, validates and processes it to produce the final
@@ -516,6 +524,8 @@ var DefaultUserConfig = UserConfig{
 
 	// Enable service wildcard entries by default.
 	EnableWildcardEntries: true,
+
+	EnableLoadBalancerICMPReply: false,
 }
 
 var DefaultConfig = Config{

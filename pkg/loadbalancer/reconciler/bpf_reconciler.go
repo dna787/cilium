@@ -42,6 +42,14 @@ const (
 	// WildcardProtoNumber is basically IPPROTO_ANY
 	WildcardProtoNumber u8proto.U8proto = u8proto.ANY
 
+	// ICMPReplyProtoNumber is the protocol an ICMP-reply service entry is keyed
+	// on. Unlike the wildcard entry below it matches ICMP and nothing else, so
+	// marking a VIP pingable cannot change what happens to its other traffic.
+	ICMPReplyProtoNumber u8proto.U8proto = u8proto.ICMP
+
+	// ICMPReplyPortNumber is a zero destination port number, as ICMP has no port.
+	ICMPReplyPortNumber uint16 = 0
+
 	// WildcardPortNumber is a zero destination port number
 	WildcardPortNumber uint16 = 0
 )
@@ -153,6 +161,12 @@ type BPFOps struct {
 	// entries and wildcard entries when reconciling the data path.
 	wildcardReferences map[netip.Addr][]loadbalancer.ServiceID
 
+	// icmpReferences maps a Netip.Addr to the parent LoadBalancer Service IDs that
+	// keep its ICMP-reply entry alive, the same way wildcardReferences does for
+	// wildcard entries. One VIP is usually shared by several service ports, and
+	// the entry must outlive all but the last of them.
+	icmpReferences map[netip.Addr][]loadbalancer.ServiceID
+
 	// nodePortAddrByPort are the last used NodePort addresses for a given NodePort
 	// (or HostPort) service (by port).
 	nodePortAddrByPort map[nodePortAddrKey][]netip.Addr
@@ -237,6 +251,7 @@ func (ops *BPFOps) ResetAndRestore() (err error) {
 	ops.backendStates = map[loadbalancer.L3n4Addr]backendState{}
 	ops.backendReferences = map[loadbalancer.L3n4Addr]sets.Set[loadbalancer.L3n4Addr]{}
 	ops.wildcardReferences = map[netip.Addr][]loadbalancer.ServiceID{}
+	ops.icmpReferences = map[netip.Addr][]loadbalancer.ServiceID{}
 	ops.nodePortAddrByPort = map[nodePortAddrKey][]netip.Addr{}
 	ops.prevSourceRanges = map[loadbalancer.L3n4Addr]sets.Set[netip.Prefix]{}
 
@@ -516,6 +531,14 @@ func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
 		}
 	}
 
+	// Cleanup any ICMP-reply entry this fe might be associated with.
+	if ops.useICMPReply() && fe.Type == loadbalancer.SVCTypeLoadBalancer &&
+		fe.Address.Scope() == loadbalancer.ScopeExternal {
+		if err := ops.deleteICMPReply(fe, feID); err != nil {
+			return fmt.Errorf("delete icmp reply: %w", err)
+		}
+	}
+
 	// Decrease the backend reference counts and drop state associated with the frontend.
 	ops.updateBackendRefCounts(fe.Address, nil)
 	delete(ops.backendReferences, fe.Address)
@@ -547,6 +570,17 @@ func (ops *BPFOps) pruneServiceMaps() error {
 			}
 
 			// Return so we don't flow into the non-wildcard entry logic.
+			return
+		}
+
+		// Same for an ICMP-reply entry: it has no backends of its own, so the
+		// slot arithmetic below would always call it an orphan.
+		if port == ICMPReplyPortNumber && proto == uint8(ICMPReplyProtoNumber) {
+			if icmpRefs := ops.icmpReferences[rawAddr]; len(icmpRefs) == 0 {
+				ops.log.Debug("pruneServiceMaps: deleting icmp reply", logfields.Address, rawAddr)
+				toDelete = append(toDelete, svcKey.ToNetwork())
+			}
+
 			return
 		}
 
@@ -1135,6 +1169,17 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 		}
 	}
 
+	// Mark a LoadBalancer VIP as answering ICMP echo. Deliberately not gated on
+	// isWildcardClass: unlike a wildcard entry this one matches ICMP only, so it
+	// is safe for a VIP that some other controller allocated, which is the usual
+	// case when Cilium is not the LB IPAM.
+	if ops.useICMPReply() && fe.Type == loadbalancer.SVCTypeLoadBalancer &&
+		fe.Address.Scope() == loadbalancer.ScopeExternal {
+		if err := ops.upsertICMPReply(fe, feID); err != nil {
+			return fmt.Errorf("upsert icmp reply: %w", err)
+		}
+	}
+
 	// Calculate the number of existing backend references, so we can cleanup if there there
 	// has been a change.
 	numPreviousBackends := len(ops.backendReferences[fe.Address])
@@ -1197,6 +1242,93 @@ func (ops *BPFOps) useMaglev(fe *loadbalancer.Frontend) bool {
 		}
 		return false
 	}
+}
+
+func (ops *BPFOps) useICMPReply() bool {
+	return ops.cfg.EnableLoadBalancerICMPReply
+}
+
+// icmpReplyKey is the service key a LoadBalancer VIP is pingable through: the
+// VIP, port 0, protocol ICMP. lb4_extract_tuple leaves an echo request with
+// exactly this key, so the datapath finds the entry on the ordinary service
+// lookup and nothing else can match it.
+func icmpReplyKey(addr netip.Addr, scope uint8) maps.ServiceKey {
+	if addr.Is6() {
+		return maps.NewService6Key(addr.AsSlice(), ICMPReplyPortNumber,
+			ICMPReplyProtoNumber, scope, 0)
+	}
+	return maps.NewService4Key(addr.AsSlice(), ICMPReplyPortNumber,
+		ICMPReplyProtoNumber, scope, 0)
+}
+
+// upsertICMPReply writes the ICMP-reply entry for a LoadBalancer VIP on behalf
+// of the first frontend that needs it, and records this frontend as a parent.
+func (ops *BPFOps) upsertICMPReply(fe *loadbalancer.Frontend, feID loadbalancer.ServiceID) error {
+	addr := fe.Address.Addr()
+	icmpRefs := ops.icmpReferences[addr]
+	if slices.Contains(icmpRefs, feID) {
+		return nil
+	}
+
+	if len(icmpRefs) == 0 {
+		var icmpVal maps.ServiceValue
+		if addr.Is6() {
+			icmpVal = &maps.Service6Value{}
+		} else {
+			icmpVal = &maps.Service4Value{}
+		}
+
+		// No backends, no RevNAT: the datapath answers the echo itself and
+		// never reaches backend selection for this entry. The flag only makes
+		// the entry legible in `cilium-dbg bpf lb list`.
+		icmpFlags := loadbalancer.NewSvcFlag(&loadbalancer.SvcFlagParam{
+			SvcType: fe.Type,
+		})
+		icmpVal.SetFlags(icmpFlags.UInt16())
+
+		ops.log.Debug("Upsert ICMP reply service entry for first parent service",
+			logfields.ID, feID,
+			logfields.Address, addr)
+		if err := ops.upsertService(icmpReplyKey(addr, fe.Address.Scope()), icmpVal); err != nil {
+			return err
+		}
+	}
+
+	ops.icmpReferences[addr] = append(icmpRefs, feID)
+
+	return nil
+}
+
+// deleteICMPReply drops one parent reference and removes the entry with the last
+// of them.
+func (ops *BPFOps) deleteICMPReply(fe *loadbalancer.Frontend, feID loadbalancer.ServiceID) error {
+	addr := fe.Address.Addr()
+	icmpRefs := ops.icmpReferences[addr]
+	numParents := len(icmpRefs)
+
+	for i, parentID := range icmpRefs {
+		if parentID != feID {
+			continue
+		}
+
+		if numParents > 1 {
+			icmpRefs = append(icmpRefs[:i], icmpRefs[i+1:]...)
+			ops.icmpReferences[addr] = icmpRefs
+			return nil
+		}
+
+		ops.log.Debug("Delete ICMP reply service entry for last parent service",
+			logfields.ID, feID,
+			logfields.Address, addr)
+		if err := ops.deleteService(icmpReplyKey(addr, fe.Address.Scope())); err != nil {
+			return err
+		}
+
+		delete(ops.icmpReferences, addr)
+		return nil
+	}
+
+	return nil
 }
 
 func (ops *BPFOps) useWildcards() bool {
@@ -1634,7 +1766,8 @@ func (ops *BPFOps) StateIsEmpty() bool {
 		len(ops.nodePortAddrByPort) == 0 &&
 		len(ops.serviceIDAlloc.addrToId) == 0 &&
 		len(ops.backendIDAlloc.addrToId) == 0 &&
-		len(ops.wildcardReferences) == 0
+		len(ops.wildcardReferences) == 0 &&
+		len(ops.icmpReferences) == 0
 }
 
 // StateSummary returns a multi-line summary of the internal state.
@@ -1652,6 +1785,7 @@ func (ops *BPFOps) StateSummary() string {
 	fmt.Fprintf(&b, "prevSourceRanges: %d\n", len(ops.prevSourceRanges))
 	fmt.Fprintf(&b, "restoredQuarantines: %d\n", len(ops.restoredQuarantinedBackends))
 	fmt.Fprintf(&b, "wildcardReferences: %d\n", len(ops.wildcardReferences))
+	fmt.Fprintf(&b, "icmpReferences: %d\n", len(ops.icmpReferences))
 
 	return b.String()
 }
