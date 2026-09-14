@@ -758,6 +758,14 @@ func (m *Map) Flush(next4, next6 func(GCEvent)) int {
 	return d
 }
 
+func GetTCPCtMap() *Map {
+	return newMap(MapNameTCP4Global, mapTypeIPv4TCPGlobal)
+}
+
+func GetAnyCtMap() *Map {
+	return newMap(MapNameAny4Global, mapTypeIPv4AnyGlobal)
+}
+
 // Maps returns a slice of all CT maps that are used.
 // If ipv4 or ipv6 are false, the maps for that protocol will not be returned.
 //
