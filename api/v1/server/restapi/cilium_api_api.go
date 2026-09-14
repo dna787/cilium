@@ -45,8 +45,10 @@ func NewCiliumAPIAPI(spec *loads.Document) *CiliumAPIAPI {
 		APIKeyAuthenticator: security.APIKeyAuth,
 		BearerAuthenticator: security.BearerAuth,
 
+		BinConsumer:  runtime.ByteStreamConsumer(),
 		JSONConsumer: runtime.JSONConsumer(),
 
+		BinProducer:  runtime.ByteStreamProducer(),
 		JSONProducer: runtime.JSONProducer(),
 
 		EndpointDeleteEndpointHandler: endpoint.DeleteEndpointHandlerFunc(func(params endpoint.DeleteEndpointParams) middleware.Responder {
@@ -113,6 +115,12 @@ func NewCiliumAPIAPI(spec *loads.Document) *CiliumAPIAPI {
 			_ = params
 
 			return middleware.NotImplemented("operation daemon.GetConfig has not yet been implemented")
+		}),
+
+		DaemonGetConntrackExportHandler: daemon.GetConntrackExportHandlerFunc(func(params daemon.GetConntrackExportParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation daemon.GetConntrackExport has not yet been implemented")
 		}),
 
 		DaemonGetDebuginfoHandler: daemon.GetDebuginfoHandlerFunc(func(params daemon.GetDebuginfoParams) middleware.Responder {
@@ -295,6 +303,12 @@ func NewCiliumAPIAPI(spec *loads.Document) *CiliumAPIAPI {
 			return middleware.NotImplemented("operation prefilter.PatchPrefilter has not yet been implemented")
 		}),
 
+		DaemonPostConntrackImportHandler: daemon.PostConntrackImportHandlerFunc(func(params daemon.PostConntrackImportParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation daemon.PostConntrackImport has not yet been implemented")
+		}),
+
 		IpamPostIpamHandler: ipam.PostIpamHandlerFunc(func(params ipam.PostIpamParams) middleware.Responder {
 			_ = params
 
@@ -340,10 +354,16 @@ type CiliumAPIAPI struct {
 	// It has a default implementation in the security package, however you can replace it for your particular usage.
 	BearerAuthenticator func(string, security.ScopedTokenAuthentication) runtime.Authenticator
 
+	// BinConsumer registers a consumer for the following mime types:
+	//   - application/octet-stream
+	BinConsumer runtime.Consumer
 	// JSONConsumer registers a consumer for the following mime types:
 	//   - application/json
 	JSONConsumer runtime.Consumer
 
+	// BinProducer registers a producer for the following mime types:
+	//   - application/octet-stream
+	BinProducer runtime.Producer
 	// JSONProducer registers a producer for the following mime types:
 	//   - application/json
 	JSONProducer runtime.Producer
@@ -370,6 +390,8 @@ type CiliumAPIAPI struct {
 	DaemonGetClusterNodesHandler daemon.GetClusterNodesHandler
 	// DaemonGetConfigHandler sets the operation handler for the get config operation
 	DaemonGetConfigHandler daemon.GetConfigHandler
+	// DaemonGetConntrackExportHandler sets the operation handler for the get conntrack export operation
+	DaemonGetConntrackExportHandler daemon.GetConntrackExportHandler
 	// DaemonGetDebuginfoHandler sets the operation handler for the get debuginfo operation
 	DaemonGetDebuginfoHandler daemon.GetDebuginfoHandler
 	// EndpointGetEndpointHandler sets the operation handler for the get endpoint operation
@@ -430,6 +452,8 @@ type CiliumAPIAPI struct {
 	EndpointPatchEndpointIDLabelsHandler endpoint.PatchEndpointIDLabelsHandler
 	// PrefilterPatchPrefilterHandler sets the operation handler for the patch prefilter operation
 	PrefilterPatchPrefilterHandler prefilter.PatchPrefilterHandler
+	// DaemonPostConntrackImportHandler sets the operation handler for the post conntrack import operation
+	DaemonPostConntrackImportHandler daemon.PostConntrackImportHandler
 	// IpamPostIpamHandler sets the operation handler for the post ipam operation
 	IpamPostIpamHandler ipam.PostIpamHandler
 	// IpamPostIpamIPHandler sets the operation handler for the post ipam IP operation
@@ -505,10 +529,16 @@ func (o *CiliumAPIAPI) RegisterFormat(name string, format strfmt.Format, validat
 func (o *CiliumAPIAPI) Validate() error {
 	var unregistered []string
 
+	if o.BinConsumer == nil {
+		unregistered = append(unregistered, "BinConsumer")
+	}
 	if o.JSONConsumer == nil {
 		unregistered = append(unregistered, "JSONConsumer")
 	}
 
+	if o.BinProducer == nil {
+		unregistered = append(unregistered, "BinProducer")
+	}
 	if o.JSONProducer == nil {
 		unregistered = append(unregistered, "JSONProducer")
 	}
@@ -545,6 +575,9 @@ func (o *CiliumAPIAPI) Validate() error {
 	}
 	if o.DaemonGetConfigHandler == nil {
 		unregistered = append(unregistered, "daemon.GetConfigHandler")
+	}
+	if o.DaemonGetConntrackExportHandler == nil {
+		unregistered = append(unregistered, "daemon.GetConntrackExportHandler")
 	}
 	if o.DaemonGetDebuginfoHandler == nil {
 		unregistered = append(unregistered, "daemon.GetDebuginfoHandler")
@@ -636,6 +669,9 @@ func (o *CiliumAPIAPI) Validate() error {
 	if o.PrefilterPatchPrefilterHandler == nil {
 		unregistered = append(unregistered, "prefilter.PatchPrefilterHandler")
 	}
+	if o.DaemonPostConntrackImportHandler == nil {
+		unregistered = append(unregistered, "daemon.PostConntrackImportHandler")
+	}
 	if o.IpamPostIpamHandler == nil {
 		unregistered = append(unregistered, "ipam.PostIpamHandler")
 	}
@@ -674,7 +710,10 @@ func (o *CiliumAPIAPI) Authorizer() runtime.Authorizer {
 func (o *CiliumAPIAPI) ConsumersFor(mediaTypes []string) map[string]runtime.Consumer {
 	result := make(map[string]runtime.Consumer, len(mediaTypes))
 	for _, mt := range mediaTypes {
-		if mt == "application/json" {
+		switch mt {
+		case "application/octet-stream":
+			result["application/octet-stream"] = o.BinConsumer
+		case "application/json":
 			result["application/json"] = o.JSONConsumer
 		}
 
@@ -692,7 +731,10 @@ func (o *CiliumAPIAPI) ConsumersFor(mediaTypes []string) map[string]runtime.Cons
 func (o *CiliumAPIAPI) ProducersFor(mediaTypes []string) map[string]runtime.Producer {
 	result := make(map[string]runtime.Producer, len(mediaTypes))
 	for _, mt := range mediaTypes {
-		if mt == "application/json" {
+		switch mt {
+		case "application/octet-stream":
+			result["application/octet-stream"] = o.BinProducer
+		case "application/json":
 			result["application/json"] = o.JSONProducer
 		}
 
@@ -779,6 +821,10 @@ func (o *CiliumAPIAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/config"] = daemon.NewGetConfig(o.context, o.DaemonGetConfigHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/conntrack/export"] = daemon.NewGetConntrackExport(o.context, o.DaemonGetConntrackExportHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
@@ -899,6 +945,10 @@ func (o *CiliumAPIAPI) initHandlerCache() {
 		o.handlers["PATCH"] = make(map[string]http.Handler)
 	}
 	o.handlers["PATCH"]["/prefilter"] = prefilter.NewPatchPrefilter(o.context, o.PrefilterPatchPrefilterHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/conntrack/import"] = daemon.NewPostConntrackImport(o.context, o.DaemonPostConntrackImportHandler)
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}

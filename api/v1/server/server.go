@@ -75,6 +75,7 @@ type apiParams struct {
 	DaemonGetCgroupDumpMetadataHandler     daemon.GetCgroupDumpMetadataHandler
 	DaemonGetClusterNodesHandler           daemon.GetClusterNodesHandler
 	DaemonGetConfigHandler                 daemon.GetConfigHandler
+	DaemonGetConntrackExportHandler        daemon.GetConntrackExportHandler
 	DaemonGetDebuginfoHandler              daemon.GetDebuginfoHandler
 	EndpointGetEndpointHandler             endpoint.GetEndpointHandler
 	EndpointGetEndpointIDHandler           endpoint.GetEndpointIDHandler
@@ -105,6 +106,7 @@ type apiParams struct {
 	EndpointPatchEndpointIDConfigHandler   endpoint.PatchEndpointIDConfigHandler
 	EndpointPatchEndpointIDLabelsHandler   endpoint.PatchEndpointIDLabelsHandler
 	PrefilterPatchPrefilterHandler         prefilter.PatchPrefilterHandler
+	DaemonPostConntrackImportHandler       daemon.PostConntrackImportHandler
 	IpamPostIpamHandler                    ipam.PostIpamHandler
 	IpamPostIpamIPHandler                  ipam.PostIpamIPHandler
 	EndpointPutEndpointIDHandler           endpoint.PutEndpointIDHandler
@@ -126,6 +128,7 @@ func newAPI(p apiParams) *restapi.CiliumAPIAPI {
 	api.DaemonGetCgroupDumpMetadataHandler = p.DaemonGetCgroupDumpMetadataHandler
 	api.DaemonGetClusterNodesHandler = p.DaemonGetClusterNodesHandler
 	api.DaemonGetConfigHandler = p.DaemonGetConfigHandler
+	api.DaemonGetConntrackExportHandler = p.DaemonGetConntrackExportHandler
 	api.DaemonGetDebuginfoHandler = p.DaemonGetDebuginfoHandler
 	api.EndpointGetEndpointHandler = p.EndpointGetEndpointHandler
 	api.EndpointGetEndpointIDHandler = p.EndpointGetEndpointIDHandler
@@ -156,6 +159,7 @@ func newAPI(p apiParams) *restapi.CiliumAPIAPI {
 	api.EndpointPatchEndpointIDConfigHandler = p.EndpointPatchEndpointIDConfigHandler
 	api.EndpointPatchEndpointIDLabelsHandler = p.EndpointPatchEndpointIDLabelsHandler
 	api.PrefilterPatchPrefilterHandler = p.PrefilterPatchPrefilterHandler
+	api.DaemonPostConntrackImportHandler = p.DaemonPostConntrackImportHandler
 	api.IpamPostIpamHandler = p.IpamPostIpamHandler
 	api.IpamPostIpamIPHandler = p.IpamPostIpamIPHandler
 	api.EndpointPutEndpointIDHandler = p.EndpointPutEndpointIDHandler

@@ -40,6 +40,7 @@ var Cell = cell.Module(
 	"BPF Maps",
 
 	cell.Provide(newMapApiHandler),
+	cell.Provide(newConntrackApiHandler),
 
 	// Provides the map spec registry which gets initialized by the specs defined in the datapath which
 	// can then be modified during hive construction and the modified specs used once started.
@@ -125,5 +126,19 @@ func newMapApiHandler(logger *slog.Logger) mapApiHandlerOut {
 		GetMapHandler:           &getMapHandler{},
 		GetMapNameHandler:       &getMapNameHandler{logger: logger},
 		GetMapNameEventsHandler: &getMapNameEventsHandler{logger: logger, mapGetter: &mapGetterImpl{logger: logger}},
+	}
+}
+
+type conntrackApiHandlerOut struct {
+	cell.Out
+
+	GetConntrackExportHandler  daemonapi.GetConntrackExportHandler
+	PostConntrackImportHandler daemonapi.PostConntrackImportHandler
+}
+
+func newConntrackApiHandler(logger *slog.Logger) conntrackApiHandlerOut {
+	return conntrackApiHandlerOut{
+		GetConntrackExportHandler:  &getConntrackExportHandler{logger: logger},
+		PostConntrackImportHandler: &postConntrackImportHandler{logger: logger},
 	}
 }
