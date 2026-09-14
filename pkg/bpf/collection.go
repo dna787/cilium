@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/cpu"
 
+	"github.com/cilium/coverbee/pkg/verifierlog"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
@@ -272,8 +273,24 @@ func LoadCollection(logger *slog.Logger, spec *ebpf.CollectionSpec, opts *Collec
 		return nil, nil, fmt.Errorf("applying program patches: %w", err)
 	}
 
+	// Ask the verifier for its statistics unless the caller wants no log at all.
+	// They come back in the program's verifier log and are the only source for
+	// how close a program is to the complexity limit.
+	if !opts.CollectionOptions.Programs.LogDisabled && opts.CollectionOptions.Programs.LogLevel == 0 {
+		opts.CollectionOptions.Programs.LogLevel = ebpf.LogLevelStats
+	}
+
 	// Attempt to load the Collection.
 	coll, err := ebpf.NewCollectionWithOptions(spec, opts.CollectionOptions)
+
+	if err == nil {
+		for _, prog := range coll.Programs {
+			logger.Debug("BPF program details", logfields.Prog, prog.String())
+			for _, line := range verifierlog.ParseVerifierLog(prog.VerifierLog) {
+				logger.Debug("Kernel verifier stat", "stat", line)
+			}
+		}
+	}
 
 	// Collect key names of maps that are not compatible with their pinned
 	// counterparts and remove their pinning flags.
