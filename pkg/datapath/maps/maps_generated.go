@@ -66,6 +66,8 @@ const (
 	CiliumLB4Affinity                   = "cilium_lb4_affinity"
 	CiliumLB4BackendsV3                 = "cilium_lb4_backends_v3"
 	CiliumLB4Health                     = "cilium_lb4_health"
+	CiliumLB4LeastconnBackend           = "cilium_lb4_leastconn_backend"
+	CiliumLB4LeastconnService           = "cilium_lb4_leastconn_service"
 	CiliumLB4Maglev                     = "cilium_lb4_maglev"
 	CiliumLB4MaglevInner                = "cilium_lb4_maglev_inner"
 	CiliumLB4ReverseNAT                 = "cilium_lb4_reverse_nat"
@@ -509,6 +511,34 @@ func newCiliumLB4HealthSpec(btf *btf.Spec) *ebpf.MapSpec {
 		Value:      anyTypeByName(btf, "lb4_health"),
 		MaxEntries: 65536,
 		Flags:      0,
+		Pinning:    ebpf.PinByName,
+	}
+}
+
+func newCiliumLB4LeastconnBackendSpec(btf *btf.Spec) *ebpf.MapSpec {
+	return &ebpf.MapSpec{
+		Name:       CiliumLB4LeastconnBackend,
+		Type:       ebpf.Hash,
+		KeySize:    4,
+		Key:        anyTypeByName(btf, "lb4_lct_key"),
+		ValueSize:  4,
+		Value:      anyTypeByName(btf, "lb4_lct_backend"),
+		MaxEntries: 65536,
+		Flags:      unix.BPF_F_NO_PREALLOC,
+		Pinning:    ebpf.PinByName,
+	}
+}
+
+func newCiliumLB4LeastconnServiceSpec(btf *btf.Spec) *ebpf.MapSpec {
+	return &ebpf.MapSpec{
+		Name:       CiliumLB4LeastconnService,
+		Type:       ebpf.Hash,
+		KeySize:    12,
+		Key:        anyTypeByName(btf, "lb4_key"),
+		ValueSize:  32,
+		Value:      anyTypeByName(btf, "lb4_lct_service"),
+		MaxEntries: 65536,
+		Flags:      unix.BPF_F_NO_PREALLOC,
 		Pinning:    ebpf.PinByName,
 	}
 }
@@ -1339,6 +1369,8 @@ var _outer []newMapFn = []newMapFn{
 	newCiliumLB4AffinitySpec,
 	newCiliumLB4BackendsV3Spec,
 	newCiliumLB4HealthSpec,
+	newCiliumLB4LeastconnBackendSpec,
+	newCiliumLB4LeastconnServiceSpec,
 	newCiliumLB4MaglevSpec,
 	newCiliumLB4ReverseNATSpec,
 	newCiliumLB4ReverseSkSpec,

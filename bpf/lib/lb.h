@@ -2012,6 +2012,12 @@ static __always_inline __u32 lb4_algorithm(const struct lb4_service *svc)
 	return lb_default_algorithm();
 }
 
+/* Included here rather than at the top of the file: it defines
+ * lb4_select_backend_id_custom() below, and its implementation needs the
+ * service and backend lookups declared above.
+ */
+#include "least_conn.h"
+
 #ifndef lb4_select_backend_id_custom
 #define lb4_select_backend_id_custom(...) 0
 #endif
@@ -2299,6 +2305,7 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 #ifdef ENABLE_ACTIVE_CONNECTION_TRACKING
 		_lb_act_conn_open(state->rev_nat_index, backend->zone);
 #endif
+		_lb_lct_conn_open(backend_id);
 
 		break;
 	case CT_REPLY:
@@ -2317,6 +2324,12 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 				_lb_act_conn_closed(svc->rev_nat_index, backend->zone);
 		}
 #endif
+		if (backend) {
+			if (state->syn) /* Reopened connections */
+				_lb_lct_conn_open(backend_id);
+			else if (state->closing)
+				_lb_lct_conn_closed(backend_id);
+		}
 		if (unlikely(!backend || backend->flags != BE_STATE_ACTIVE)) {
 			/* Drain existing connections, but redirect new ones to only
 			 * active backends.

@@ -33,6 +33,7 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maglev"
+	"github.com/cilium/cilium/pkg/maps/leastconn"
 	"github.com/cilium/cilium/pkg/promise"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/u8proto"
@@ -529,6 +530,14 @@ func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
 		if err := ops.deleteWildcard(fe, feID); err != nil {
 			return fmt.Errorf("delete wildcard: %w", err)
 		}
+	}
+
+	// Drop the least-conn entry for this frontend, releasing the BPF timer it
+	// holds. Keyed on the frontend address, so it is per service port.
+	if !fe.Address.IsIPv6() {
+		leastconn.DeleteService(maps.NewService4Key(
+			fe.Address.AddrCluster().AsNetIP(), fe.Address.Port(), proto,
+			fe.Address.Scope(), 0))
 	}
 
 	// Cleanup any ICMP-reply entry this fe might be associated with.
@@ -1461,6 +1470,9 @@ func (ops *BPFOps) deleteBackend(ipv6 bool, id loadbalancer.BackendID) error {
 	if err != nil {
 		return fmt.Errorf("delete backend %d: %w", id, err)
 	}
+	// Drop its least-conn counter too, or the id would carry a stale count into
+	// whatever backend is allocated that id next.
+	leastconn.DeleteBackendByID(id)
 	return nil
 }
 

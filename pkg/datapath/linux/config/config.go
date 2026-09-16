@@ -346,6 +346,11 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *config.Config) erro
 		if cfg.LBConfig.EnableLoadBalancerICMPReply {
 			cDefinesMap["ENABLE_LOADBALANCER_ICMP_REPLY"] = "1"
 		}
+		// least-conn is reachable only through the per-service annotation, so
+		// the datapath only needs it when annotations are enabled.
+		if cfg.LBConfig.AlgorithmAnnotation {
+			cDefinesMap["ENABLE_LEAST_CONN"] = "1"
+		}
 		if option.Config.EnableNat46X64Gateway {
 			cDefinesMap["ENABLE_NAT_46X64_GATEWAY"] = "1"
 		}

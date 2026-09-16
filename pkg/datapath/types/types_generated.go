@@ -505,6 +505,32 @@ type LB4Key struct {
 	Pad         [2]uint8
 }
 
+// LB4LctBackend is generated from the BPF C type lb4_lct_backend.
+type LB4LctBackend struct {
+	_     structs.HostLayout
+	Count uint32
+}
+
+// LB4LctKey is generated from the BPF C type lb4_lct_key.
+type LB4LctKey struct {
+	_         structs.HostLayout
+	BackendID uint32
+}
+
+// LB4LctService is generated from the BPF C type lb4_lct_service.
+type LB4LctService struct {
+	_           structs.HostLayout
+	IsTmrActive uint32
+	BackendID   uint32
+	LastSlot    uint16
+	RestCount   uint16
+	LastRun     uint32
+	Tmr         struct {
+		_ structs.HostLayout
+		_ [16]byte
+	}
+}
+
 // LB4ReverseNAT is generated from the BPF C type lb4_reverse_nat.
 type LB4ReverseNAT struct {
 	_       structs.HostLayout

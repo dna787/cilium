@@ -29,6 +29,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpointstate"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
+	"github.com/cilium/cilium/pkg/maps/leastconn"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
@@ -297,7 +298,15 @@ func (gc *GC) enableWithConfig(
 
 			if len(eps) > 0 || initialScan {
 				gc.logger.Info("Starting GC of connection tracking", logfields.First, initialScan)
+				if initialScan {
+					// Only the first pass rebuilds the least-conn counters. The
+					// pinned counter map outlives an agent restart while the
+					// agent's view of it does not, and the conntrack table is
+					// the only authority on what is actually still open.
+					leastconn.InitCached()
+				}
 				maxDeleteRatio, success = runGC(ipv4, ipv6, triggeredBySignal, gcFilter)
+				leastconn.FlushCached()
 			}
 
 			interval := getIntervalWithConfig(gc.logger, gcInterval, cachedGCInterval, maxDeleteRatio,

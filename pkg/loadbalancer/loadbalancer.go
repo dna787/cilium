@@ -122,6 +122,10 @@ func init() {
 		Value:     SVCLoadBalancingAlgorithmMaglev,
 		UseMaglev: true,
 	})
+	RegisterSVCLoadBalancingAlgorithm(SVCLoadBalancingAlgorithmSpec{
+		Name:  LBAlgorithmLeastConn,
+		Value: SVCLoadBalancingAlgorithmCustom,
+	})
 }
 
 func RegisterSVCLoadBalancingAlgorithm(spec SVCLoadBalancingAlgorithmSpec) {

@@ -119,6 +119,11 @@ const (
 	// LBAlgorithmMaglev is for using maglev consistent hashing for backend selection
 	LBAlgorithmMaglev = "maglev"
 
+	// LBAlgorithmLeastConn selects the backend with the fewest open connections.
+	// Only selectable per service through the annotation: bpf-lb-algorithm is
+	// validated against random/maglev, so it cannot be a node-wide default.
+	LBAlgorithmLeastConn = "least-conn"
+
 	// LBModeSNAT is for SNATing requests to remote nodes
 	LBModeSNAT = "snat"
 

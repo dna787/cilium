@@ -16,8 +16,10 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/bpf"
+	loadbalancer "github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/maps/leastconn"
 	"github.com/cilium/cilium/pkg/maps/nat"
 	"github.com/cilium/cilium/pkg/maps/timestamp"
 	"github.com/cilium/cilium/pkg/metrics"
@@ -541,8 +543,19 @@ func (m *Map) cleanup(filter GCFilter, natMap *nat.Map, stats *gcStats, next fun
 			tupleKey.GetDestPort(), tupleKey.GetSourcePort(),
 			uint8(tupleKey.GetNextHeader()), tupleKey.GetFlags(), entry)
 
+		// Keep the least-conn per-backend counters honest. The datapath counts
+		// a close only when it sees one, so an entry that merely expires would
+		// leak a count; and a full pass recounts what is actually alive, which
+		// is what corrects any drift. Both are no-ops unless least-conn is on.
+		isSVC := tupleKey.GetFlags()&TUPLE_F_SERVICE != 0
+
 		switch action {
 		case deleteEntry:
+			if isSVC && (tupleKey.GetNextHeader() != u8proto.TCP || !entry.IsClosed()) {
+				// TCP sessions the datapath saw closing are already accounted
+				// for; everything else reaches here without having been.
+				leastconn.DecrementCounterByID(loadbalancer.BackendID(entry.Union0[1]))
+			}
 			err := m.purgeCtEntry(ctKey, entry, natMap, next, countFailedFn)
 			if err != nil {
 				if errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -562,6 +575,9 @@ func (m *Map) cleanup(filter GCFilter, natMap *nat.Map, stats *gcStats, next fun
 			}
 		default:
 			stats.aliveEntries++
+			if isSVC {
+				leastconn.IncrementCachedCounterByID(loadbalancer.BackendID(entry.Union0[1]))
+			}
 		}
 	}
 }

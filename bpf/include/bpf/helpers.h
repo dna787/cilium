@@ -29,6 +29,11 @@
 # include "helpers_xdp.h"
 #endif
 
+/* timer API */
+static long BPF_FUNC(timer_init, struct bpf_timer *timer, void *map, __u64 flags);
+static long BPF_FUNC(timer_set_callback, struct bpf_timer *timer, void *callback_fn);
+static long BPF_FUNC(timer_start, struct bpf_timer *timer, __u64 nsecs, __u64 flags);
+
 /* Map access/manipulation */
 static void *BPF_FUNC(map_lookup_elem, const void *map, const void *key);
 static int BPF_FUNC(map_update_elem, const void *map, const void *key,

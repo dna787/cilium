@@ -346,6 +346,12 @@ func (c *CtEntry) isDsrInternalEntry() bool {
 	return c.Flags&DSRInternal != 0
 }
 
+// IsClosed reports whether either direction of a TCP session has been seen
+// closing, which is how the datapath already accounted for it.
+func (c *CtEntry) IsClosed() bool {
+	return (c.Flags&RxClosing) != 0 || (c.Flags&TxClosing) != 0
+}
+
 func (c *CtEntry) flagsString() string {
 	var sb strings.Builder
 
