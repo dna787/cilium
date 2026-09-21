@@ -112,6 +112,10 @@ type DefaultController struct {
 
 	ciliumEndpoint resource.Resource[*v2.CiliumEndpoint]
 
+	// priorityFilter decides which endpoint owns a shared address; see
+	// priority.go.
+	priorityFilter priorityFilter
+
 	wp *workerpool.WorkerPool
 }
 

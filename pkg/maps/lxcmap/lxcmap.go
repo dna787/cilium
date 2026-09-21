@@ -4,6 +4,7 @@
 package lxcmap
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -39,6 +40,10 @@ type Map interface {
 	// DeleteEntry deletes a single map entry
 	DeleteEntry(addr netip.Addr) error
 
+	// AddressMoved withholds or restores the entry for an address depending on
+	// whether another node currently owns it. See shared_address.go.
+	AddressMoved(addr netip.Addr, remote bool) error
+
 	// DeleteElement deletes the endpoint using all keys which represent the
 	// endpoint. It returns the number of errors encountered during deletion.
 	DeleteElement(logger *slog.Logger, f EndpointFrontend) []error
@@ -53,6 +58,10 @@ type Map interface {
 
 type lxcMap struct {
 	bpfMap *bpf.Map
+
+	// shared withholds entries for addresses another node currently owns; see
+	// shared_address.go.
+	shared *sharedAddresses
 }
 
 func newMap(registry *metrics.Registry) *lxcMap {
@@ -66,6 +75,7 @@ func newMap(registry *metrics.Registry) *lxcMap {
 		).
 			WithCache().WithPressureMetric(registry).
 			WithEvents(option.Config.GetEventBufferConfig(mapName)),
+		shared: newSharedAddresses(),
 	}
 }
 
@@ -254,6 +264,24 @@ func (m *lxcMap) WriteEndpoint(f EndpointFrontend) error {
 	var writtenKeys []*EndpointKey
 
 	for _, key := range keys {
+		// Only the IPv4 entry is ever withheld. DVP gives the two pods of a
+		// migrating VM one shared IPv4 but distinct IPv6 addresses, so the IPv6
+		// entry is never in conflict and is written as usual.
+		//
+		// While another node owns the address the entry is remembered rather
+		// than written, so that it can be restored as soon as the address comes
+		// back without waiting for the endpoint to regenerate.
+		if key.Family == bpf.EndpointKeyIPv4 && !m.shared.record(f.IPv4Address(), key, info) {
+			// Delete rather than merely skip: the map is pinned and outlives
+			// the agent, so an entry written before a restart -- or before the
+			// address moved -- is still there and would keep this node
+			// answering for an address it no longer owns.
+			if err := m.bpfMap.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("failed to withhold key %v in LXC map: %w", key, err)
+			}
+			continue
+		}
+
 		if err := m.bpfMap.Update(key, info); err != nil {
 			for _, k := range writtenKeys {
 				_ = m.bpfMap.Delete(k)
@@ -291,6 +319,9 @@ func (m *lxcMap) DeleteEntry(addr netip.Addr) error {
 
 func (m *lxcMap) DeleteElement(logger *slog.Logger, f EndpointFrontend) []error {
 	var errors []error
+	if addr := f.IPv4Address(); addr.IsValid() {
+		m.shared.forget(addr)
+	}
 	for _, k := range m.getBPFKeys(f) {
 		if err := m.bpfMap.Delete(k); err != nil {
 			errors = append(errors, fmt.Errorf("unable to delete key %v from %s: %w", k, bpf.MapPath(logger, mapName), err))

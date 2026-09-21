@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync/atomic"
 
 	"github.com/cilium/hive/cell"
@@ -139,6 +140,58 @@ func (k *K8sCiliumEndpointsWatcher) ciliumEndpointsInit(ctx context.Context) {
 			event.Done(nil)
 		}
 	}()
+}
+
+// isLocalNodeIP reports whether the given address is this node's own.
+func (k *K8sCiliumEndpointsWatcher) isLocalNodeIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	ln, err := k.localNodeStore.Get(context.TODO())
+	if err != nil {
+		return false
+	}
+	return ln.GetNodeIP(false).Equal(ip)
+}
+
+// mayUpdateIPcacheFor reports whether it is safe to run endpointUpdated for a
+// departing CiliumEndpoint.
+//
+// Several CiliumEndpoints can share one address while a VM is migrating, and
+// endpointUpdated upserts the address under the surviving endpoint's identity
+// while deleting the departing one's. Run for an endpoint whose address is in
+// fact held by another pod, it would take that pod's entry away and send its
+// traffic to a pod that is going away. Upstream already guards the delete path
+// this way through DeleteOnMetadataMatch; this is the same test for the update
+// path.
+//
+// It is a veto, not an assertion of ownership: the answer is "no objection"
+// unless something indicates the entry belongs to someone else. So an endpoint
+// claiming no address passes -- there is nothing shared to protect, and upstream
+// behaviour must not change for it -- while a single address that ipcache
+// attributes to another pod blocks the whole update. An address ipcache has no
+// record of, or one that cannot be parsed, blocks it too: ownership cannot be
+// established, so the safe answer is to leave ipcache alone.
+func (k *K8sCiliumEndpointsWatcher) mayUpdateIPcacheFor(c *types.CiliumEndpoint) bool {
+	if c.Networking == nil {
+		return true
+	}
+
+	for _, pair := range c.Networking.Addressing {
+		if pair.IPV4 == "" {
+			continue
+		}
+		addr, err := netip.ParseAddr(pair.IPV4)
+		if err != nil {
+			return false
+		}
+		meta := k.ipcache.GetK8sMetadata(addr)
+		if meta == nil || meta.Namespace != c.Namespace || meta.PodName != c.Name {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint) {

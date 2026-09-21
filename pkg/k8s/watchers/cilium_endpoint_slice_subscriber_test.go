@@ -4,6 +4,7 @@ package watchers
 
 import (
 	"fmt"
+	"net"
 	"testing"
 
 	"github.com/cilium/hive/hivetest"
@@ -88,6 +89,16 @@ func (w *fakeEPWatcher) endpointUpdated(oldC, newC *types.CiliumEndpoint) {
 
 func (w *fakeEPWatcher) endpointDeleted(c *types.CiliumEndpoint) {
 	w.deleted = append(w.deleted, c)
+}
+
+// The stub owns every address and considers no address local, so the existing
+// tests keep exercising the paths they were written for.
+func (w *fakeEPWatcher) mayUpdateIPcacheFor(c *types.CiliumEndpoint) bool {
+	return true
+}
+
+func (w *fakeEPWatcher) isLocalNodeIP(ip net.IP) bool {
+	return false
 }
 
 func (w *fakeEPWatcher) assertUpdate(u endpointUpdate) (string, bool) {

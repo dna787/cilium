@@ -78,6 +78,12 @@ const (
 	// unknown identity.
 	IDNameUnknown = "unknown"
 
+	// IDNamePriority is the label deciding which pod owns a shared IPv4
+	// address. Lower numbers win. DVP live-migrates a VM as two pods holding
+	// one address, and this is how the cluster is told which of them to send
+	// traffic to.
+	IDNamePriority = "network.deckhouse.io/pod-common-ip-priority"
+
 	// The aggregate identities are used for policy map aggregation but never
 	// applied to traffic directly.
 	// see pkg/policy/aggregate.go for details

@@ -96,13 +96,45 @@ func (c *DefaultController) onEndpointUpdate(cep *cilium_api_v2.CiliumEndpoint) 
 	if !isValidEndpoint(cep) {
 		return
 	}
+
+	// Record the endpoint's claim on its address first: the CES this update
+	// touches must be reconciled with the ownership decision already made, and
+	// a change of owner means the previous one has to be republished without
+	// the address.
+	before, after, priority := c.priorityFilter.upsert(cep)
+	delay, forceFast := c.syncDelay, false
+	if priority == High && before != after {
+		delay, forceFast = ForceCESSyncTime, true
+	}
+	if before != after && before != (cepKey{}) {
+		c.enqueueOwnerCES(before, delay, forceFast)
+	}
+
 	touchedCESs := c.manager.UpdateCEPMapping(k8s.ConvertCEPToCoreCEP(cep), cep.Namespace)
-	c.enqueueCESReconciliation(touchedCESs)
+	c.enqueueCESReconciliationWithDelay(touchedCESs, delay, forceFast)
 }
 
 func (c *DefaultController) onEndpointDelete(cep *cilium_api_v2.CiliumEndpoint) {
+	// The address may pass to another endpoint, which then has to be
+	// republished carrying it.
+	before, after := c.priorityFilter.remove(cep)
+	if before != after && after != (cepKey{}) {
+		c.enqueueOwnerCES(after, c.syncDelay, false)
+	}
+
 	touchedCES := c.manager.RemoveCEPMapping(k8s.ConvertCEPToCoreCEP(cep), cep.Namespace)
 	c.enqueueCESReconciliation([]CESKey{touchedCES})
+}
+
+// enqueueOwnerCES reconciles the CES holding the given endpoint, so a change of
+// address owner is published for the endpoint that lost it as well as the one
+// that gained it.
+func (c *DefaultController) enqueueOwnerCES(key cepKey, delay time.Duration, forceFast bool) {
+	cesName, exists := c.manager.mapping.getCESName(NewCEPName(key.name, key.namespace))
+	if !exists {
+		return
+	}
+	c.enqueueCESReconciliationWithDelay([]CESKey{NewCESKey(cesName.string(), key.namespace)}, delay, forceFast)
 }
 
 func (c *Controller) onSliceUpdate(ces *capi_v2a1.CiliumEndpointSlice) {
@@ -114,13 +146,17 @@ func (c *Controller) onSliceDelete(ces *capi_v2a1.CiliumEndpointSlice) {
 }
 
 func (c *Controller) addToQueue(ces CESKey) {
+	c.addToQueueWithDelay(ces, c.syncDelay, false)
+}
+
+func (c *Controller) addToQueueWithDelay(ces CESKey, delay time.Duration, forceFast bool) {
 	c.priorityNamespacesLock.RLock()
 	_, exists := c.priorityNamespaces[ces.Namespace]
 	c.priorityNamespacesLock.RUnlock()
-	time.AfterFunc(c.syncDelay, func() {
+	time.AfterFunc(delay, func() {
 		c.cond.L.Lock()
 		defer c.cond.L.Unlock()
-		if exists {
+		if exists || forceFast {
 			c.fastQueue.Add(ces)
 		} else {
 			c.standardQueue.Add(ces)
@@ -132,6 +168,10 @@ func (c *Controller) addToQueue(ces CESKey) {
 }
 
 func (c *Controller) enqueueCESReconciliation(cess []CESKey) {
+	c.enqueueCESReconciliationWithDelay(cess, c.syncDelay, false)
+}
+
+func (c *Controller) enqueueCESReconciliationWithDelay(cess []CESKey, delay time.Duration, forceFast bool) {
 	for _, ces := range cess {
 		c.logger.Debug("Enqueueing CES (if not empty name)", logfields.CESName, ces.string())
 		if ces.Name != "" {
@@ -140,7 +180,7 @@ func (c *Controller) enqueueCESReconciliation(cess []CESKey) {
 				c.enqueuedAt[ces] = time.Now()
 			}
 			c.enqueuedAtLock.Unlock()
-			c.addToQueue(ces)
+			c.addToQueueWithDelay(ces, delay, forceFast)
 		}
 	}
 }
@@ -182,6 +222,13 @@ func (c *DefaultController) Start(ctx cell.HookContext) error {
 	c.manager = newDefaultManager(c.maxCEPsInCES, c.logger)
 
 	c.reconciler = newDefaultReconciler(c.context, c.clientset.CiliumV2alpha1(), c.manager, c.logger, c.ciliumEndpoint, c.ciliumEndpointSlice, c.metrics)
+	// Apply the ownership decision where the published object is built. The
+	// reconciler rebuilds every CoreCiliumEndpoint from the informer store, so
+	// a decision made anywhere else is discarded; see priority.go.
+	c.reconciler.reconciler.endpointGetter = &priorityEndpointGetter{
+		inner:  c.reconciler,
+		filter: &c.priorityFilter,
+	}
 	c.doReconciler = c.reconciler
 
 	c.initializeQueue()

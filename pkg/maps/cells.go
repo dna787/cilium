@@ -33,6 +33,7 @@ import (
 	"github.com/cilium/cilium/pkg/maps/srv6map"
 	"github.com/cilium/cilium/pkg/maps/subnet"
 	"github.com/cilium/cilium/pkg/maps/vtep"
+	"github.com/cilium/cilium/pkg/sharedip"
 )
 
 // Cell contains all cells which are providing BPF Maps.
@@ -109,6 +110,10 @@ var Cell = cell.Module(
 
 	// Provides access to the lxc / endpoints map.
 	lxcmap.Cell,
+
+	// Keeps the endpoints map in step with which node owns a shared pod
+	// address; see pkg/sharedip.
+	sharedip.Cell,
 
 	// Provides access to the vtep map.
 	vtep.Cell,

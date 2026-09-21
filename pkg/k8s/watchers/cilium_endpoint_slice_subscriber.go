@@ -5,6 +5,7 @@ package watchers
 
 import (
 	"log/slog"
+	"net"
 
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/k8s"
@@ -20,6 +21,8 @@ import (
 type endpointWatcher interface {
 	endpointUpdated(oldC, newC *types.CiliumEndpoint)
 	endpointDeleted(c *types.CiliumEndpoint)
+	mayUpdateIPcacheFor(c *types.CiliumEndpoint) bool
+	isLocalNodeIP(ip net.IP) bool
 }
 
 type localEndpointCache interface {
@@ -143,6 +146,30 @@ func (cs *cesSubscriber) onDelete(ces *cilium_v2a1.CiliumEndpointSlice, cep *typ
 	cs.deleteCEPfromCES(CEPName, ces.GetName(), cep)
 }
 
+// isDeadLocalEndpoint reports whether this CiliumEndpoint describes an endpoint
+// on this node that the agent no longer has.
+//
+// Such a CEP is a leftover: the pod is gone, but another CiliumEndpointSlice
+// still lists it. Restoring it would resurrect an endpoint that does not exist.
+//
+// The window is short and internal to the CiliumEndpointSlice controller, which
+// makes it awkward to stage deliberately -- CiliumEndpoints are garbage
+// collected with their pod, so the leftover cannot be manufactured from outside
+// the cluster. It is not hypothetical: this was observed in production on
+// cilium 1.17, which is why the check exists.
+func (cs *cesSubscriber) isDeadLocalEndpoint(c *types.CiliumEndpoint) bool {
+	if c == nil || c.Networking == nil {
+		return false
+	}
+
+	cepNode := net.ParseIP(c.Networking.NodeIP)
+	if cepNode == nil || !cs.epWatcher.isLocalNodeIP(cepNode) {
+		return false
+	}
+
+	return cs.epCache.LookupCEPName(k8sUtils.GetObjNamespaceName(c)) == nil
+}
+
 // deleteCEP deletes the CEP and CES from the map.
 // If this was last CES for the CEP it triggers endpointDeleted.
 // If this was used CES for the CEP it picks other CES and triggers endpointUpdated.
@@ -154,7 +181,27 @@ func (cs *cesSubscriber) deleteCEPfromCES(CEPName, CESName string, c *types.Cili
 	if !needUpdate {
 		return
 	}
-	cep, exists := cs.cepMap.getCEPLocked(CEPName)
+	// Drain any leftover CiliumEndpointSlices still listing a local endpoint the
+	// agent no longer has: each would otherwise be restored below as if the pod
+	// were alive. Deleting one can expose another, hence the loop.
+	var cep *types.CiliumEndpoint
+	exists := false
+	for {
+		cep, exists = cs.cepMap.getCEPLocked(CEPName)
+		if !exists || !cs.isDeadLocalEndpoint(cep) {
+			break
+		}
+
+		currentCES := cs.cepMap.currentCES[CEPName]
+		cs.logger.Debug(
+			"Found dead local CEP, calling endpointDeleted",
+			logfields.CESName, currentCES,
+			logfields.CEPName, CEPName,
+		)
+		cs.cepMap.deleteCEPLocked(CEPName, currentCES)
+		cs.epWatcher.endpointDeleted(cep)
+	}
+
 	if !exists {
 		cs.logger.Debug(
 			"CEP deleted, calling endpointDeleted",
@@ -162,13 +209,22 @@ func (cs *cesSubscriber) deleteCEPfromCES(CEPName, CESName string, c *types.Cili
 			logfields.CEPName, CEPName,
 		)
 		cs.epWatcher.endpointDeleted(c)
-	} else {
+	} else if cs.epWatcher.mayUpdateIPcacheFor(c) {
 		cs.logger.Debug(
 			"CEP deleted, other CEP exists, calling endpointUpdated",
 			logfields.CESName, CESName,
 			logfields.CEPName, CEPName,
 		)
 		cs.epWatcher.endpointUpdated(c, cep)
+	} else {
+		// Several CiliumEndpoints share this address and the departing one does
+		// not own it. Updating ipcache from it would overwrite the entry of the
+		// pod that does, sending its traffic to a pod that is going away.
+		cs.logger.Debug(
+			"CEP deleted but does not own its address, leaving ipcache alone",
+			logfields.CESName, CESName,
+			logfields.CEPName, CEPName,
+		)
 	}
 }
 

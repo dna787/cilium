@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 
 	"k8s.io/apimachinery/pkg/util/runtime"
 
@@ -85,6 +86,7 @@ type ipcacheManager interface {
 	UpsertMetadata(prefix cmtypes.PrefixCluster, src source.Source, resource ipcacheTypes.ResourceID, aux ...ipcache.IPMetadata)
 	RemoveLabelsExcluded(lbls labels.Labels, toExclude map[cmtypes.PrefixCluster]struct{}, resource ipcacheTypes.ResourceID)
 	DeleteOnMetadataMatch(IP string, source source.Source, namespace, name string) (namedPortsChanged bool)
+	GetK8sMetadata(ip netip.Addr) *ipcache.K8sMetadata
 }
 
 type hostNetworkManager interface {

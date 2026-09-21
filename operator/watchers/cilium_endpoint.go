@@ -93,6 +93,10 @@ func transformToCiliumEndpoint(obj any) (any, error) {
 				ResourceVersion: concreteObj.ResourceVersion,
 				OwnerReferences: concreteObj.OwnerReferences,
 				UID:             concreteObj.UID,
+				// Kept because the shared-address priority is read from the
+				// object's own labels; without this the operator only ever
+				// sees the identity's copy.
+				Labels: concreteObj.Labels,
 			},
 			Status: cilium_api_v2.EndpointStatus{
 				Identity:   concreteObj.Status.Identity,
